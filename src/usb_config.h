@@ -1,0 +1,43 @@
+#ifndef CHERRYUSB_CONFIG_H
+#define CHERRYUSB_CONFIG_H
+
+#include <stdio.h>
+
+#define CONFIG_USB_PRINTF(...) printf(__VA_ARGS__)
+
+#ifndef CONFIG_USB_DBG_LEVEL
+#define CONFIG_USB_DBG_LEVEL USB_DBG_INFO
+#endif
+
+#define CONFIG_USB_ALIGN_SIZE 4
+
+#ifndef CONFIG_USBDEV_MAX_BUS
+#define CONFIG_USBDEV_MAX_BUS 1
+#endif
+
+#define CONFIG_USB_EHCI_HCOR_RESERVED_DISABLE
+
+#define CONFIG_USBHOST_MAX_RHPORTS          1
+#define CONFIG_USBHOST_MAX_EXTHUBS          1
+#define CONFIG_USBHOST_MAX_EHPORTS          4
+#define CONFIG_USBHOST_MAX_INTERFACES       8
+#define CONFIG_USBHOST_MAX_INTF_ALTSETTINGS 8
+#define CONFIG_USBHOST_MAX_ENDPOINTS        4
+#define CONFIG_USBHOST_DEV_NAMELEN          16
+#define CONFIG_USBHOST_MAX_BUS              1
+
+#ifndef CONFIG_USBDEV_REQUEST_BUFFER_LEN
+#define CONFIG_USBDEV_REQUEST_BUFFER_LEN 512
+#endif
+
+#define CONFIG_USBDEV_ADVANCE_DESC
+
+#ifndef USB_NOCACHE_RAM_SECTION
+#define USB_NOCACHE_RAM_SECTION __attribute__((section(".noncacheable"), aligned(4)))
+#endif
+
+#ifndef USB_MEM_ALIGNX
+#define USB_MEM_ALIGNX __attribute__((aligned(CONFIG_USB_ALIGN_SIZE)))
+#endif
+
+#endif /* CHERRYUSB_CONFIG_H */
