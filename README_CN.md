@@ -117,12 +117,15 @@ Windows 下先克隆 T-Head 工具链，然后使用仓库自带的脚本：
 ```bat
 git clone https://gitee.com/bouffalolab/toolchain_gcc_t-head_windows.git
 
-build_windows.bat rebuild     rem LCTech BL616，Full-Speed
-build_windows.bat             rem 增量编译
-build_windows.bat flash COM5  rem 串口烧录
+build_windows.bat both         rem 构建 Full-Speed + High-Speed 两个版本
+build_windows.bat rebuild      rem LCTech BL616，Full-Speed
+build_windows.bat              rem 增量编译
+build_windows.bat flash COM5   rem 串口烧录
 ```
 
-脚本默认要求 DS5Dongle BL618 SDK 分支位于 `..\bouffalo_sdk`（见步骤 1），工具链位于 `%USERPROFILE%\Desktop\toolchain_gcc_t-head_windows`。可通过环境变量 `BL_SDK_BASE` / `TOOLCHAIN_PATH` 覆盖；其他开发板用 `BOARD_TYPE=aim61` / `BOARD_TYPE=m0sdock`，High-Speed 变体用 `USB_SPEED=hs`。
+`build_windows.bat both` 会同时产出 `ds5dongle-lctech616.bin`（Full-Speed）和 `ds5dongle-lctech616-hs.bin`（High-Speed）；只构建 High-Speed 单版本也可用 `USB_SPEED=hs build_windows.bat rebuild`。
+
+脚本默认要求 DS5Dongle BL618 SDK 分支位于 `..\bouffalo_sdk`（见步骤 1），工具链位于 `%USERPROFILE%\Desktop\toolchain_gcc_t-head_windows`。可通过环境变量 `BL_SDK_BASE` / `TOOLCHAIN_PATH` 覆盖；其他开发板用 `BOARD_TYPE=aim61` / `BOARD_TYPE=m0sdock`。
 
 ### 5. 烧录
 

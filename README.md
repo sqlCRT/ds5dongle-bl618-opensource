@@ -119,12 +119,15 @@ On Windows, clone the T-Head toolchain and use the provided script:
 ```bat
 git clone https://gitee.com/bouffalolab/toolchain_gcc_t-head_windows.git
 
-build_windows.bat rebuild     rem LCTech BL616, Full-Speed
-build_windows.bat             rem incremental build
-build_windows.bat flash COM5  rem flash via serial
+build_windows.bat both         rem build Full-Speed + High-Speed variants
+build_windows.bat rebuild      rem LCTech BL616, Full-Speed
+build_windows.bat              rem incremental build
+build_windows.bat flash COM5   rem flash via serial
 ```
 
-The script expects the DS5Dongle BL618 SDK fork at `..\bouffalo_sdk` (step 1) and the toolchain at `%USERPROFILE%\Desktop\toolchain_gcc_t-head_windows` by default. Override with the `BL_SDK_BASE` / `TOOLCHAIN_PATH` environment variables; other boards via `BOARD_TYPE=aim61` / `BOARD_TYPE=m0sdock`, and the High-Speed variant via `USB_SPEED=hs`.
+`build_windows.bat both` produces both `ds5dongle-lctech616.bin` (Full-Speed) and `ds5dongle-lctech616-hs.bin` (High-Speed); a single High-Speed build is also possible via `USB_SPEED=hs build_windows.bat rebuild`.
+
+The script expects the DS5Dongle BL618 SDK fork at `..\bouffalo_sdk` (step 1) and the toolchain at `%USERPROFILE%\Desktop\toolchain_gcc_t-head_windows` by default. Override with the `BL_SDK_BASE` / `TOOLCHAIN_PATH` environment variables; other boards via `BOARD_TYPE=aim61` / `BOARD_TYPE=m0sdock`.
 
 ### 5. Flash
 
