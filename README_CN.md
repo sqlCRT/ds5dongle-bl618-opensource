@@ -48,10 +48,9 @@ GND              → USB GND（黑色）
 
 ```bash
 git clone https://github.com/sqlCRT/bouffalo_sdk.git bouffalo_sdk
-cd bouffalo_sdk && git checkout 04428daf && cd ..
 ```
 
-构建脚本要求 SDK 位于 `../bouffalo_sdk`（与本仓库同级目录）。该分支基于上游 v2.3.28，并针对 DS5Dongle BL618 做了针对性修改，详见其 README。
+构建脚本要求 SDK 位于 `../bouffalo_sdk`（与本仓库同级目录），直接使用该分支的 `master` 即可。该分支基于上游 v2.3.28，并针对 DS5Dongle BL618 做了针对性修改，详见其 README。
 
 ### 2. 安装依赖
 

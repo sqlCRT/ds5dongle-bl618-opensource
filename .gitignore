@@ -8,5 +8,6 @@ bouffalo_sdk_ds5/
 *.ota
 *.xz.ota
 *.tar.gz
+*.zip
 .DS_Store
 *.code-workspace

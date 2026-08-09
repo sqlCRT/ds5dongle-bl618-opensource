@@ -50,10 +50,9 @@ If the host does not supply power over USB, the board needs separate power via i
 
 ```bash
 git clone https://github.com/sqlCRT/bouffalo_sdk.git bouffalo_sdk
-cd bouffalo_sdk && git checkout 04428daf && cd ..
 ```
 
-The build script expects the SDK in `../bouffalo_sdk` (a sibling directory of this repository). The fork is based on upstream v2.3.28 with targeted DS5Dongle BL618 modifications; see its README for details.
+The build script expects the SDK in `../bouffalo_sdk` (a sibling directory of this repository) and builds against the fork's `master` branch. The fork is based on upstream v2.3.28 with targeted DS5Dongle BL618 modifications; see its README for details.
 
 ### 2. Dependencies
 
