@@ -112,6 +112,20 @@ bash build_macos.sh strip      # remove .o/.a to shrink build dir
 
 Output: `firmware/{board}/ds5dongle-{board}.bin` (~800 KB) plus boot2/partition files and a `flash_prog_cfg.ini`. Built binaries are git-ignored — attach them to a GitHub Release if you want to distribute prebuilt firmware.
 
+#### Windows
+
+On Windows, clone the T-Head toolchain and use the provided script:
+
+```bat
+git clone https://gitee.com/bouffalolab/toolchain_gcc_t-head_windows.git
+
+build_windows.bat rebuild     rem LCTech BL616, Full-Speed
+build_windows.bat             rem incremental build
+build_windows.bat flash COM5  rem flash via serial
+```
+
+The script expects the DS5Dongle BL618 SDK fork at `..\bouffalo_sdk` (step 1) and the toolchain at `%USERPROFILE%\Desktop\toolchain_gcc_t-head_windows` by default. Override with the `BL_SDK_BASE` / `TOOLCHAIN_PATH` environment variables; other boards via `BOARD_TYPE=aim61` / `BOARD_TYPE=m0sdock`, and the High-Speed variant via `USB_SPEED=hs`.
+
 ### 5. Flash
 
 #### LCTech BL616 — Dev Cube (UART/ISP mode)

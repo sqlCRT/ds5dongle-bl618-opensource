@@ -110,6 +110,20 @@ bash build_macos.sh strip      # 删除 .o/.a 中间文件，缩小 build 目录
 
 产物位于 `firmware/{board}/ds5dongle-{board}.bin`（约 800KB），以及 boot2/partition 文件和 `flash_prog_cfg.ini`。编译产物已被 git 忽略 —— 如需分发预编译固件，建议附加到 GitHub Release。
 
+#### Windows 编译
+
+Windows 下先克隆 T-Head 工具链，然后使用仓库自带的脚本：
+
+```bat
+git clone https://gitee.com/bouffalolab/toolchain_gcc_t-head_windows.git
+
+build_windows.bat rebuild     rem LCTech BL616，Full-Speed
+build_windows.bat             rem 增量编译
+build_windows.bat flash COM5  rem 串口烧录
+```
+
+脚本默认要求 DS5Dongle BL618 SDK 分支位于 `..\bouffalo_sdk`（见步骤 1），工具链位于 `%USERPROFILE%\Desktop\toolchain_gcc_t-head_windows`。可通过环境变量 `BL_SDK_BASE` / `TOOLCHAIN_PATH` 覆盖；其他开发板用 `BOARD_TYPE=aim61` / `BOARD_TYPE=m0sdock`，High-Speed 变体用 `USB_SPEED=hs`。
+
 ### 5. 烧录
 
 #### LCTech BL616 — Dev Cube（UART/ISP 模式）
