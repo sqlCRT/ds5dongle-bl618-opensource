@@ -37,7 +37,17 @@
 #define MULT16_16SU(a,b) ((opus_val32)(opus_val16)(a)*(opus_val32)(opus_uint16)(b))
 
 /** 16x32 multiplication, followed by a 16-bit shift right. Results fits in 32 bits */
-#if OPUS_FAST_INT64
+#if defined(E907_OPUS_DSP)
+static OPUS_INLINE opus_val32 e907_mult16_32_q16(opus_val16 a, opus_val32 b)
+{
+    opus_val32 result;
+    __asm__ volatile("smmwb %0, %1, %2"
+                     : "=r"(result)
+                     : "r"(b), "r"((opus_val32)a));
+    return result;
+}
+#define MULT16_32_Q16(a,b) e907_mult16_32_q16((opus_val16)(a),(opus_val32)(b))
+#elif OPUS_FAST_INT64
 #define MULT16_32_Q16(a,b) ((opus_val32)SHR((opus_int64)((opus_val16)(a))*(b),16))
 #else
 #define MULT16_32_Q16(a,b) ADD32(MULT16_16((a),SHR((b),16)), SHR(MULT16_16SU((a),((b)&0x0000ffff)),16))
@@ -51,7 +61,17 @@
 #endif
 
 /** 16x32 multiplication, followed by a 15-bit shift right. Results fits in 32 bits */
-#if OPUS_FAST_INT64
+#if defined(E907_OPUS_DSP)
+static OPUS_INLINE opus_val32 e907_mult16_32_q15(opus_val16 a, opus_val32 b)
+{
+    opus_val32 result;
+    __asm__ volatile("kmmwb2 %0, %1, %2"
+                     : "=r"(result)
+                     : "r"(b), "r"((opus_val32)a));
+    return result;
+}
+#define MULT16_32_Q15(a,b) e907_mult16_32_q15((opus_val16)(a),(opus_val32)(b))
+#elif OPUS_FAST_INT64
 #define MULT16_32_Q15(a,b) ((opus_val32)SHR((opus_int64)((opus_val16)(a))*(b),15))
 #else
 #define MULT16_32_Q15(a,b) ADD32(SHL(MULT16_16((a),SHR((b),16)),1), SHR(MULT16_16SU((a),((b)&0x0000ffff)),15))

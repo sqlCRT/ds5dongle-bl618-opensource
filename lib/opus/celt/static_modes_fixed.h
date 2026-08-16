@@ -156,7 +156,11 @@ static const unsigned char qext_cache_caps50[112] = {
 
 #ifndef FFT_TWIDDLES48000_960
 #define FFT_TWIDDLES48000_960
-static const kiss_twiddle_cpx fft_twiddles48000_960[480] = {
+static const kiss_twiddle_cpx fft_twiddles48000_960[480]
+#ifdef OPUS_TCM_CONST
+OPUS_TCM_CONST
+#endif
+= {
 #ifdef ENABLE_QEXT
 {2147483647, 0}, {2147299668, -28109692},
 {2146747759, -56214568}, {2145828016, -84309812},
@@ -817,7 +821,11 @@ NULL,
 
 #ifndef MDCT_TWIDDLES960
 #define MDCT_TWIDDLES960
-static const celt_coef mdct_twiddles960[1800] = {
+static const celt_coef mdct_twiddles960[1800]
+#ifdef OPUS_TCM_CONST
+OPUS_TCM_CONST
+#endif
+= {
 #ifdef ENABLE_QEXT
 2147483468, 2147469095, 2147431723, 2147371355, 2147287990,
 2147181629, 2147052273, 2146899924, 2146724584, 2146526254,

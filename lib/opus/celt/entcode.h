@@ -149,4 +149,12 @@ static OPUS_INLINE opus_int32 celt_sudiv(opus_int32 n, opus_int32 d) {
 #endif
 }
 
+#if defined(E907_OPUS_DSP)
+static OPUS_INLINE opus_uint32 celt_udiv_pow2(opus_uint32 n, opus_uint32 d) {
+   celt_assert(d>0);
+   celt_assert((d&(d-1))==0);
+   return n >> (EC_ILOG(d)-1);
+}
+#endif
+
 #endif

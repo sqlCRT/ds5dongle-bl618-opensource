@@ -508,6 +508,9 @@ static int patch_transient_decision(celt_glog *newE, celt_glog *oldE, int nbEBan
 
 /** Apply window and compute the MDCT for all sub-frames and
     all channels in a frame */
+#ifdef OPUS_TCM_CODE
+OPUS_TCM_CODE
+#endif
 static void compute_mdcts(const CELTMode *mode, int shortBlocks, celt_sig * OPUS_RESTRICT in,
                           celt_sig * OPUS_RESTRICT out, int C, int CC, int LM, int upsample,
                           int arch)

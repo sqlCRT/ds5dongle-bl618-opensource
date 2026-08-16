@@ -38,6 +38,7 @@
 #include "bands.h"
 #include "rate.h"
 #include "pitch.h"
+#include "entcode.h"
 #include "SigProc_FIX.h"
 
 #if defined(FIXED_POINT)
@@ -130,7 +131,11 @@ void exp_rotation(celt_norm *X, int len, int dir, int stride, int K, int spread)
    }
    /*NOTE: As a minor optimization, we could be passing around log2(B), not B, for both this and for
       extract_collapse_mask().*/
+#if defined(E907_OPUS_DSP)
+   len = celt_udiv_pow2(len, stride);
+#else
    len = celt_udiv(len, stride);
+#endif
    for (i=0;i<stride;i++)
    {
       if (dir < 0)
@@ -189,7 +194,11 @@ static unsigned extract_collapse_mask(int *iy, int N, int B)
       return 1;
    /*NOTE: As a minor optimization, we could be passing around log2(B), not B, for both this and for
       exp_rotation().*/
+#if defined(E907_OPUS_DSP)
+   N0 = celt_udiv_pow2(N, B);
+#else
    N0 = celt_udiv(N, B);
+#endif
    collapse_mask = 0;
    i=0; do {
       int j;

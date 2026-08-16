@@ -62,9 +62,22 @@
 #   define S_MUL2(a,b) MULT16_32_Q16(b, a)
 #endif
 
+#if defined(E907_OPUS_DSP) && !defined(ENABLE_QEXT)
+#   define C_MUL(m,a,b) \
+      do { opus_val32 _pk = ((opus_val32)(opus_uint16)(b).i << 16) \
+                          | (opus_uint16)(b).r; \
+           opus_val32 _t; \
+           __asm__ volatile("kmmwb2 %0, %1, %2" : "=r"((m).r) : "r"((a).r), "r"(_pk)); \
+           __asm__ volatile("kmmwt2 %0, %1, %2" : "=r"(_t) : "r"((a).i), "r"(_pk)); \
+           (m).r = SUB32_ovflw((m).r, _t); \
+           __asm__ volatile("kmmwt2 %0, %1, %2" : "=r"((m).i) : "r"((a).r), "r"(_pk)); \
+           __asm__ volatile("kmmawb2 %0, %1, %2" : "+r"((m).i) : "r"((a).i), "r"(_pk)); \
+      } while(0)
+#else
 #   define C_MUL(m,a,b) \
       do{ (m).r = SUB32_ovflw(S_MUL((a).r,(b).r) , S_MUL((a).i,(b).i)); \
           (m).i = ADD32_ovflw(S_MUL((a).r,(b).i) , S_MUL((a).i,(b).r)); }while(0)
+#endif
 
 #   define C_MULC(m,a,b) \
       do{ (m).r = ADD32_ovflw(S_MUL((a).r,(b).r) , S_MUL((a).i,(b).i)); \

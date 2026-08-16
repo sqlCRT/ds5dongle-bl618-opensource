@@ -212,8 +212,14 @@ int log2_frac(opus_uint32 val, int frac)
    splitting a band from a standard Opus mode: 176, 144, 96, 88, 72, 64, 48,
    44, 36, 32, 24, 22, 18, 16, 8, 4, 2).*/
 #if defined(CWRS_EXTRA_ROWS)
+#ifdef OPUS_TCM_CONST
+OPUS_TCM_CONST
+#endif
 static const opus_uint32 CELT_PVQ_U_DATA[1488]={
 #else
+#ifdef OPUS_TCM_CONST
+OPUS_TCM_CONST
+#endif
 static const opus_uint32 CELT_PVQ_U_DATA[1272]={
 #endif
   /*N=0, K=0...176:*/

@@ -42,6 +42,7 @@
 #include "rate.h"
 #include "quant_bands.h"
 #include "pitch.h"
+#include "entcode.h"
 
 int hysteresis_decision(opus_val16 val, const opus_val16 *thresholds, const opus_val16 *hysteresis, int N, int prev)
 {
@@ -1268,7 +1269,11 @@ static unsigned quant_band(struct band_ctx *ctx, celt_norm *X,
 
    longBlocks = B0==1;
 
+#if defined(E907_OPUS_DSP)
+   N_B = celt_udiv_pow2(N_B, B);
+#else
    N_B = celt_udiv(N_B, B);
+#endif
 
    /* Special case for one sample */
    if (N==1)
@@ -1586,6 +1591,9 @@ static void special_hybrid_folding(const CELTMode *m, celt_norm *norm, celt_norm
 }
 #endif
 
+#ifdef OPUS_TCM_CODE
+OPUS_TCM_CODE
+#endif
 void quant_all_bands(int encode, const CELTMode *m, int start, int end,
       celt_norm *X_, celt_norm *Y_, unsigned char *collapse_masks,
       const celt_ener *bandE, int *pulses, int shortBlocks, int spread,

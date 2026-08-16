@@ -119,6 +119,9 @@ void clt_mdct_clear(mdct_lookup *l, int arch)
 
 /* Forward MDCT trashes the input array */
 #ifndef OVERRIDE_clt_mdct_forward
+#ifdef OPUS_TCM_CODE
+OPUS_TCM_CODE
+#endif
 void clt_mdct_forward_c(const mdct_lookup *l, kiss_fft_scalar *in, kiss_fft_scalar * OPUS_RESTRICT out,
       const celt_coef *window, int overlap, int shift, int stride, int arch)
 {
@@ -265,6 +268,9 @@ void clt_mdct_forward_c(const mdct_lookup *l, kiss_fft_scalar *in, kiss_fft_scal
 #endif /* OVERRIDE_clt_mdct_forward */
 
 #ifndef OVERRIDE_clt_mdct_backward
+#ifdef OPUS_TCM_CODE
+OPUS_TCM_CODE
+#endif
 void clt_mdct_backward_c(const mdct_lookup *l, kiss_fft_scalar *in, kiss_fft_scalar * OPUS_RESTRICT out,
       const celt_coef * OPUS_RESTRICT window, int overlap, int shift, int stride, int arch)
 {

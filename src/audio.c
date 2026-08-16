@@ -13,6 +13,14 @@
 #include "debug_log.h"
 #include <math.h>
 
+/* Opus internal CTL — force CELT-only to skip SILK mode decision per frame */
+#ifndef OPUS_SET_FORCE_MODE_REQUEST
+#define OPUS_SET_FORCE_MODE_REQUEST 11002
+#endif
+#ifndef MODE_CELT_ONLY
+#define MODE_CELT_ONLY 1002
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -66,21 +74,23 @@ static volatile bool encoder_reset_pending;
 static uint8_t  opus_slots[2][OPUS_OUT_SIZE];
 static int8_t   haptic_slots[2][HAPTIC_BUF_SIZE];
 
-/* Pre-computed polyphase sinc filter: [phase][tap] */
-static float sinc_coeff[RESAMP_PHASES][SINC_TAPS];
+/* Pre-computed polyphase sinc filter in q15 fixed-point.
+ * Init uses float for precision; hot path uses int32 MAC only.
+ * Coefficients per phase are normalized to sum = 32768 (1.0 in q15),
+ * so max accumulator value = 32768 * 32768 = 1,073,741,824 < INT32_MAX. */
+static int16_t sinc_q15[RESAMP_PHASES][SINC_TAPS];
 
 static void resamp_sinc_init(void)
 {
-    const float cutoff = 480.0f / 512.0f; /* anti-alias at output Nyquist */
+    const float cutoff = 480.0f / 512.0f;
 
     for (int p = 0; p < RESAMP_PHASES; p++) {
         float frac = (float)p / (float)RESAMP_PHASES;
+        float coeffs_f[SINC_TAPS];
         float sum = 0.0f;
 
         for (int t = 0; t < SINC_TAPS; t++) {
             float x = (float)(t - (SINC_HALF_TAPS - 1)) - frac;
-
-            /* sinc(x * cutoff) * cutoff */
             float sx = x * cutoff;
             float s;
             if (fabsf(sx) < 1e-6f)
@@ -88,43 +98,66 @@ static void resamp_sinc_init(void)
             else
                 s = cutoff * sinf((float)M_PI * sx) / ((float)M_PI * sx);
 
-            /* Hann window over kernel span */
             float wn = ((float)t + 0.5f) / (float)SINC_TAPS;
             float w = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * wn));
 
-            sinc_coeff[p][t] = s * w;
-            sum += sinc_coeff[p][t];
+            coeffs_f[t] = s * w;
+            sum += coeffs_f[t];
         }
 
         if (fabsf(sum) > 1e-6f) {
             for (int t = 0; t < SINC_TAPS; t++)
-                sinc_coeff[p][t] /= sum;
+                coeffs_f[t] /= sum;
         }
+
+        /* Float -> q15, then adjust largest tap so sum == 32768 exactly */
+        int32_t qsum = 0;
+        int max_idx = 0;
+        float max_val = 0.0f;
+        for (int t = 0; t < SINC_TAPS; t++) {
+            int32_t q = (int32_t)(coeffs_f[t] * 32768.0f +
+                                  (coeffs_f[t] >= 0 ? 0.5f : -0.5f));
+            if (q > 32767) q = 32767;
+            if (q < -32768) q = -32768;
+            sinc_q15[p][t] = (int16_t)q;
+            qsum += q;
+            if (fabsf(coeffs_f[t]) > max_val) {
+                max_val = fabsf(coeffs_f[t]);
+                max_idx = t;
+            }
+        }
+        int32_t fix = 32768 - qsum;
+        int32_t corrected = sinc_q15[p][max_idx] + fix;
+        if (corrected > 32767) corrected = 32767;
+        if (corrected < -32768) corrected = -32768;
+        sinc_q15[p][max_idx] = (int16_t)corrected;
     }
 }
 
-/* ---- Polyphase sinc resample 512 → 480 (stereo int16) ---- */
+/* ---- Polyphase sinc resample 512 -> 480 (stereo int16, q15 fixed-point) ---- */
 static void resample_512_480(const int16_t *in, int16_t *out)
 {
     for (int i = 0; i < OPUS_FRAME_SAMPLES; i++) {
-        uint32_t src_pos = (uint32_t)i * 16;  /* i * 512/480 scaled by RESAMP_PHASES */
+        uint32_t src_pos = (uint32_t)i * 16;
         int center = (int)(src_pos / RESAMP_PHASES);
         int phase  = (int)(src_pos % RESAMP_PHASES);
 
-        const float *c = sinc_coeff[phase];
-        float sum_l = 0.0f, sum_r = 0.0f;
+        const int16_t *c = sinc_q15[phase];
+        int32_t sum_l = (1 << 14);  /* +0.5 LSB rounding bias before >>15 */
+        int32_t sum_r = (1 << 14);
 
         for (int t = 0; t < SINC_TAPS; t++) {
             int idx = center + t - (SINC_HALF_TAPS - 1);
             if (idx < 0) idx = 0;
             if (idx >= HALF_ACCUM) idx = HALF_ACCUM - 1;
 
-            sum_l += (float)in[idx * 2]     * c[t];
-            sum_r += (float)in[idx * 2 + 1] * c[t];
+            int16_t coeff = c[t];
+            sum_l += (int32_t)in[idx * 2]     * coeff;
+            sum_r += (int32_t)in[idx * 2 + 1] * coeff;
         }
 
-        int32_t l = (int32_t)(sum_l + (sum_l >= 0 ? 0.5f : -0.5f));
-        int32_t r = (int32_t)(sum_r + (sum_r >= 0 ? 0.5f : -0.5f));
+        int32_t l = sum_l >> 15;
+        int32_t r = sum_r >> 15;
         if (l > 32767) l = 32767; if (l < -32768) l = -32768;
         if (r > 32767) r = 32767; if (r < -32768) r = -32768;
 
@@ -142,11 +175,17 @@ static void decimate_haptics(const int16_t *in, int8_t *out, uint32_t in_samples
     if (out_pairs > HAPTIC_BUF_SIZE / 2)
         out_pairs = HAPTIC_BUF_SIZE / 2;
 
-    /* haptics_gain [1.0,2.0] → fixed-point 8.8: 256..512 */
-    float gain_f = config_get()->haptics_gain;
-    if (gain_f < 1.0f) gain_f = 1.0f;
-    if (gain_f > 2.0f) gain_f = 2.0f;
-    int32_t gain_fp = (int32_t)(gain_f * 256.0f);
+    /* haptics_gain [1.0,2.0] → fixed-point 8.8: 256..512
+     * Cached: recompute only when config value changes. */
+    static float prev_gain_f = -1.0f;
+    static int32_t gain_fp = 256;
+    float cur_gain = config_get()->haptics_gain;
+    if (cur_gain != prev_gain_f) {
+        prev_gain_f = cur_gain;
+        if (cur_gain < 1.0f) cur_gain = 1.0f;
+        if (cur_gain > 2.0f) cur_gain = 2.0f;
+        gain_fp = (int32_t)(cur_gain * 256.0f);
+    }
 
     for (uint32_t i = 0; i < out_pairs; i++) {
         uint32_t idx = (i * HAPTIC_DECIMATE) * 2;
@@ -245,6 +284,7 @@ int audio_init(void)
     opus_encoder_ctl(encoder, OPUS_SET_BITRATE(200 * 8 * 100));
     opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
     opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(0));
+    opus_encoder_ctl(encoder, OPUS_SET_FORCE_MODE_REQUEST, (opus_int32)MODE_CELT_ONLY);
 
     decoder = (OpusDecoder *)decoder_mem;
     err = opus_decoder_init(decoder, 48000, MIC_CHANNELS);
@@ -302,6 +342,7 @@ static void send_mic_status(void)
     bt_hid_host_send_output(pkt, DS5_BT_OUTPUT_EXT_SIZE);
 }
 
+__attribute__((section(".tcm_code")))
 void audio_task(void *arg)
 {
     (void)arg;
@@ -321,6 +362,9 @@ void audio_task(void *arg)
                 bool speaker_on = !config_get()->disable_speaker;
 
                 for (int slot = 0; slot < 2; slot++) {
+                    if (slot == 1)
+                        taskYIELD();
+
                     const uint32_t base = (uint32_t)slot * HALF_ACCUM;
 
                     for (uint32_t i = 0; i < HALF_ACCUM; i++) {
@@ -437,6 +481,7 @@ bool audio_mic_active(void)
  * Blocks on mic_queue so it doesn't burn CPU when mic is inactive.
  * Decodes one Opus frame per wakeup → writes to USB mic ring buffer.
  * Keeps audio_task cycle at ~21ms regardless of mic decoding cost. */
+__attribute__((section(".tcm_code")))
 void audio_mic_task(void *arg)
 {
     (void)arg;
@@ -467,9 +512,11 @@ void audio_mic_task(void *arg)
             LOG_INF("[AUDIO] First mic frame decoded (%d samples)\n", decoded);
         }
 
+        /* Pack mono → stereo via uint32: one 32-bit write per sample (LE). */
+        uint32_t *out32 = (uint32_t *)mic_stereo;
         for (int i = 0; i < decoded; i++) {
-            mic_stereo[i * 2]     = mic_mono[i];
-            mic_stereo[i * 2 + 1] = mic_mono[i];
+            uint16_t s = (uint16_t)mic_mono[i];
+            out32[i] = (uint32_t)s | ((uint32_t)s << 16);
         }
         usb_audio_mic_write(mic_stereo, (uint32_t)decoded);
     }

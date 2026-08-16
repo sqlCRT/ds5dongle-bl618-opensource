@@ -77,6 +77,28 @@ static volatile uint64_t out_isr_ts_us = 0;   /* timestamp set in USB ISR */
 static volatile uint32_t out_drop_count = 0;   /* queue-full drops */
 static uint64_t out_last_send_us = 0;          /* last BT send timestamp */
 
+/* Apply dongle config overlays directly onto a raw SetStateData frame
+ * (pass-through mode — no flag accumulation, matches DS5Dongle behavior). */
+static void apply_config_overlay(uint8_t *d, uint16_t len)
+{
+    if (len < DS5_USB_OUTPUT_PAYLOAD_LEN) return;
+    struct config_body *cfg = config_get();
+    if (cfg->trigger_reduce > 0) {
+        d[1] |= 0x40;
+        d[36] = (d[36] & 0x0F) | ((cfg->trigger_reduce & 0x0F) << 4);
+    }
+    if (cfg->speaker_gain > 0) {
+        d[1] |= 0x80;
+        d[37] = cfg->speaker_gain & 0x07;
+    }
+    if (cfg->lock_volume)
+        d[0] &= ~0x70;
+    else {
+        if (d[0] & 0x10) cfg->headset_volume = d[4];
+        if (d[0] & 0x20) cfg->speaker_volume = d[5];
+    }
+}
+
 /* Build a standard 0x31 BT output report (78 bytes) for ongoing output.
  * set_state_data: 47 bytes of SetStateData
  * seq: sequence counter
@@ -789,38 +811,29 @@ static void bt_task(void *arg)
                 state_mgr_clear_flags();
             }
 
+            /* Pass-through output forwarding (matches DS5Dongle):
+             * Each USB output frame is independently forwarded to BT with
+             * only config overlays applied — no flag accumulation or merging. */
             if (state_mgr_is_spk_active()) {
-                /* Audio active: drain queue without blocking (prevent overflow),
-                 * rate-limit BT game output to every 21ms (aligned with audio
-                 * cycle) to avoid L2CAP contention and BT scheduler overload.
-                 * Use 16ms delay to match the non-audio path's yield pattern. */
-                int drained = 0;
                 while (xQueueReceive(output_queue, usb_out, 0) == pdTRUE) {
-                    state_mgr_update(usb_out + 1, DS5_USB_OUTPUT_PAYLOAD_LEN);
-                    cache_output_state(usb_out + 1);
-                    drained++;
-                }
-                uint64_t now_us = bflb_mtimer_get_time_us();
-                if (drained > 0 && (now_us - out_last_send_us) >= 21000) {
-                    uint8_t merged[DS5_USB_OUTPUT_PAYLOAD_LEN];
-                    state_mgr_get(merged, DS5_USB_OUTPUT_PAYLOAD_LEN);
+                    uint8_t *payload = usb_out + 1;
+                    apply_config_overlay(payload, DS5_USB_OUTPUT_PAYLOAD_LEN);
+                    cache_output_state(payload);
                     uint8_t bt_out[DS5_BT_OUTPUT_REPORT_SIZE];
-                    build_bt_output(merged, DS5_USB_OUTPUT_PAYLOAD_LEN,
+                    build_bt_output(payload, DS5_USB_OUTPUT_PAYLOAD_LEN,
                                     output_seq, bt_out);
                     output_seq = (output_seq + 1) & 0x0F;
                     bt_hid_host_send_output(bt_out, DS5_BT_OUTPUT_REPORT_SIZE);
-                    state_mgr_clear_flags();
-                    out_last_send_us = now_us;
                 }
                 vTaskDelay(pdMS_TO_TICKS(16));
             } else if (xQueueReceive(output_queue, usb_out, pdMS_TO_TICKS(16)) == pdTRUE) {
-                state_mgr_update(usb_out + 1, DS5_USB_OUTPUT_PAYLOAD_LEN);
-                cache_output_state(usb_out + 1);
+                uint8_t *payload = usb_out + 1;
 
                 /* Stealth mode: drain Windows' blue init frames without forwarding
                  * to BT, then fire primer so controller receives purple BEFORE
                  * any Windows output (same ordering as normal mode). */
                 if (stealth_primer_countdown > 0) {
+                    cache_output_state(payload);
                     stealth_primer_countdown--;
                     if (stealth_primer_countdown == 0) {
                         LOG_INF("[MAIN] Stealth: primer fired, forwarding starts\n");
@@ -832,16 +845,13 @@ static void bt_task(void *arg)
                     goto next_output_iter;
                 }
 
-                if (state_mgr_should_send(usb_out + 1)) {
-                    uint8_t merged[DS5_USB_OUTPUT_PAYLOAD_LEN];
-                    state_mgr_get(merged, DS5_USB_OUTPUT_PAYLOAD_LEN);
-                    uint8_t bt_out[DS5_BT_OUTPUT_REPORT_SIZE];
-                    build_bt_output(merged, DS5_USB_OUTPUT_PAYLOAD_LEN,
-                                    output_seq, bt_out);
-                    output_seq = (output_seq + 1) & 0x0F;
-                    bt_hid_host_send_output(bt_out, DS5_BT_OUTPUT_REPORT_SIZE);
-                    state_mgr_clear_flags();
-                }
+                apply_config_overlay(payload, DS5_USB_OUTPUT_PAYLOAD_LEN);
+                cache_output_state(payload);
+                uint8_t bt_out[DS5_BT_OUTPUT_REPORT_SIZE];
+                build_bt_output(payload, DS5_USB_OUTPUT_PAYLOAD_LEN,
+                                output_seq, bt_out);
+                output_seq = (output_seq + 1) & 0x0F;
+                bt_hid_host_send_output(bt_out, DS5_BT_OUTPUT_REPORT_SIZE);
 next_output_iter:;
             }
             idle_ticks = 0;

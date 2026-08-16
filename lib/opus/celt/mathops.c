@@ -286,6 +286,15 @@ opus_val32 celt_rcp_norm32(opus_val32 x)
 /** Reciprocal approximation (Q15 input, Q16 output) */
 opus_val32 celt_rcp(opus_val32 x)
 {
+#if defined(E907_OPUS_DSP)
+   celt_sig_assert(x>0);
+   if (x == 1) return 2147483647;
+   opus_uint32 result;
+   __asm__ volatile("divu %0, %1, %2"
+                    : "=r"(result)
+                    : "r"(0x80000000U), "r"((opus_uint32)x));
+   return (opus_val32)result;
+#else
    int i;
    opus_val16 r;
    celt_sig_assert(x>0);
@@ -298,6 +307,7 @@ opus_val32 celt_rcp(opus_val32 x)
        of 7.05346E-5, a (relative) RMSE of 2.14418E-5, and a peak absolute
        error of 1.24665/32768. */
    return VSHR32(EXTEND32(r),i-16);
+#endif
 }
 
 #endif
