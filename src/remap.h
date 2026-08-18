@@ -3,9 +3,9 @@
 #include <stdbool.h>
 
 /* ------------------------------------------------------------------ */
-/* Button remap table — maps 15 DualSense buttons to BTN targets      */
-/* Keyboard (KBD) mapping is currently disabled — kept in protocol    */
-/* for future use but ignored by firmware.                             */
+/* Button remap table — maps 15 DualSense buttons to BTN or KBD       */
+/* BTN: remap to another gamepad button                                */
+/* KBD: emit HID keyboard keycode (+ optional modifier or 2nd key)    */
 /* ------------------------------------------------------------------ */
 
 #define REMAP_BTN_COUNT  15
@@ -43,14 +43,22 @@ typedef struct {
     uint8_t flags;     /* bit0: REMAP_FLAG_SUPPRESS; bit1: REMAP_FLAG_EXTRA_KEY */
 } remap_entry_t;
 
+#define REMAP_PROFILE_COUNT 2
+
 /* Public API */
 void remap_init(void);
 void remap_load(void);
 bool remap_save(void);
+bool remap_save_profile(uint8_t profile);
 void remap_set(const uint8_t *data, uint8_t len);
+void remap_set_profile(uint8_t profile, const uint8_t *data, uint8_t len);
 void remap_reset(void);
+void remap_reset_profile(uint8_t profile);
 void remap_apply(uint8_t *payload);
 void remap_kbd_tick(const uint8_t *payload);
 void remap_on_disconnect(void);
 bool remap_has_kbd_targets(void);
 const remap_entry_t *remap_get_table(void);
+const remap_entry_t *remap_get_profile_table(uint8_t profile);
+uint8_t remap_get_active_profile(void);
+void remap_switch_profile(uint8_t profile);

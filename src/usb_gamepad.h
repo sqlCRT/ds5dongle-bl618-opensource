@@ -5,10 +5,9 @@
 #include <stdbool.h>
 
 #define USB_GAMEPAD_EP_IN       0x84
-#define USB_GAMEPAD_EP_OUT      0x03
-#define USB_KBD_EP_IN           0x83  /* EP3 IN — shares FIFO F2 (BID) with EP3 OUT (gamepad) */
+#define USB_KBD_EP_IN           0x83
 #define USB_GAMEPAD_EP_MPS      64
-#define USB_KBD_EP_MPS          8
+#define USB_KBD_EP_MPS          9     /* Report ID (1) + 8 bytes keyboard */
 #define USB_GAMEPAD_INTERVAL_MS 1
 #define USB_KBD_INTERVAL_MS     10
 
@@ -31,6 +30,7 @@ int usb_gamepad_init(usb_gamepad_output_cb_t output_cb);
 int usb_gamepad_send_raw_input(const uint8_t *payload);
 bool usb_gamepad_is_ready(void);
 int  usb_gamepad_send_kbd_report(const uint8_t *report, uint8_t len);
+int  usb_gamepad_send_consumer_report(uint16_t usage);
 bool usb_gamepad_kbd_ready(void);
 
 void usb_gamepad_set_suspend_hooks(void (*on_suspend)(void),

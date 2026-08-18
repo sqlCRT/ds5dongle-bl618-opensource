@@ -67,6 +67,14 @@ static volatile TickType_t connecting_start_tick = 0;
 static volatile bool dse_mode_changed = false;
 static volatile bool prev_led_disabled = false;
 static volatile bool scan_after_disconnect = false;
+/* Deferred USB soft-disconnect: wait N seconds after BT disconnect before
+ * pulling USB, so quick controller switching preserves Windows audio session. */
+#define USB_DEFERRED_DISC_US  (10ULL * 1000000ULL)
+static volatile uint64_t usb_deferred_disc_us = 0;
+/* Deferred primer re-send: after CONNECTED, wait ~300ms then re-send
+ * volume to ensure the controller has fully initialized its HID channel. */
+static volatile uint64_t primer_resend_us = 0;
+#define PRIMER_RESEND_DELAY_US  (300ULL * 1000ULL)
 /* Stealth mode: frames of Windows USB output to wait before sending primer */
 static volatile uint8_t stealth_primer_countdown = 0;
 static uint8_t output_seq = 0;  /* sequence counter for 0x31 BT output */
@@ -75,7 +83,6 @@ static uint32_t usb_fwd_count = 0;
 
 static volatile uint64_t out_isr_ts_us = 0;   /* timestamp set in USB ISR */
 static volatile uint32_t out_drop_count = 0;   /* queue-full drops */
-static uint64_t out_last_send_us = 0;          /* last BT send timestamp */
 
 /* Apply dongle config overlays directly onto a raw SetStateData frame
  * (pass-through mode — no flag accumulation, matches DS5Dongle behavior). */
@@ -91,9 +98,17 @@ static void apply_config_overlay(uint8_t *d, uint16_t len)
         d[1] |= 0x80;
         d[37] = cfg->speaker_gain & 0x07;
     }
-    if (cfg->lock_volume)
-        d[0] &= ~0x70;
-    else {
+    if (cfg->lock_volume) {
+        static uint8_t lock_vol_log_cnt = 0;
+        d[0] = (d[0] & ~0x70) | 0x30;
+        d[4] = cfg->headset_volume;
+        d[5] = cfg->speaker_volume;
+        if (lock_vol_log_cnt < 5) {
+            lock_vol_log_cnt++;
+            LOG_INF("[VOL-LOCK] inject hp=%d spk=%d flags0=0x%02X\n",
+                    cfg->headset_volume, cfg->speaker_volume, d[0]);
+        }
+    } else {
         if (d[0] & 0x10) cfg->headset_volume = d[4];
         if (d[0] & 0x20) cfg->speaker_volume = d[5];
     }
@@ -255,6 +270,13 @@ static void send_led_primer(void)
                            cfg->speaker_gain, cfg->trigger_reduce);
     uint8_t merged[DS5_USB_OUTPUT_PAYLOAD_LEN];
     state_mgr_get(merged, DS5_USB_OUTPUT_PAYLOAD_LEN);
+
+    /* Always include volume in primer so controller starts with correct level.
+     * Critical for lock_volume: without this, controller resets to default 0. */
+    merged[0] |= 0x30;
+    LOG_INF("[PRIMER] vol hp=%d spk=%d lock=%d\n",
+            cfg->headset_volume, cfg->speaker_volume, cfg->lock_volume);
+
     merged[44] = cfg->led_r;
     merged[45] = cfg->led_g;
     merged[46] = cfg->led_b;
@@ -316,6 +338,7 @@ static void on_hid_state(enum bt_hid_host_state state)
         handshake_start_us = 0;
         connecting_start_tick = 0;
         stealth_primer_countdown = 0;
+        primer_resend_us = 0;
         bool was_connected = ds5_connected;
         if (was_connected) {
             uint64_t since_out = bflb_mtimer_get_time_us() - out_isr_ts_us;
@@ -341,8 +364,10 @@ static void on_hid_state(enum bt_hid_host_state state)
         first_input_logged = false;
         usb_wake_on_bt_disconnect();
         if (was_connected && !bt_hid_host_is_switching() &&
-            !config_wake_enabled() && !usb_wake_host_suspended())
-            usb_soft_disconnect();
+            !config_wake_enabled() && !usb_wake_host_suspended()) {
+            usb_deferred_disc_us = bflb_mtimer_get_time_us();
+            LOG_INF("[MAIN] USB disconnect deferred (10s timer started)\n");
+        }
         dse_reset();
         audio_reset();
         remap_on_disconnect();
@@ -411,12 +436,14 @@ static void on_hid_state(enum bt_hid_host_state state)
         handshake_start_us = 0;
 
         if (ever_connected) {
-            /* Reconnection: USB was soft-disconnected in IDLE handler.
-             * Do a full USB replug so the host re-enumerates and re-sends
-             * all init (including adaptive triggers). */
+            if (usb_deferred_disc_us) {
+                usb_deferred_disc_us = 0;
+                LOG_INF("[MAIN] Deferred disconnect cancelled — USB stayed connected\n");
+            } else {
+                usb_soft_connect();
+                LOG_INF("[MAIN] USB replug (was disconnected)\n");
+            }
             stealth_primer_countdown = 5;
-            LOG_INF("[MAIN] Reconnect: USB replug + primer pending\n");
-            usb_soft_connect();
         } else if (config_usb_stealth()) {
             /* First connection, stealth: USB was disconnected at boot.
              * Let Windows send blue init, then override with our primer. */
@@ -433,6 +460,7 @@ static void on_hid_state(enum bt_hid_host_state state)
         ever_connected = true;
         battery_low = false;
         battery_warn = false;
+        primer_resend_us = bflb_mtimer_get_time_us();
         usb_wake_on_bt_connect();
         conn_led_start_us = bflb_mtimer_get_time_us();
         conn_led_off = false;
@@ -457,21 +485,21 @@ static void on_usb_output(const uint8_t *data, uint16_t len)
     if (!ds5_connected || len < 2)
         return;
 
-    if (data[0] == DS5_USB_REPORT_ID_OUTPUT) {
-        uint8_t msg[USB_OUTPUT_BUF_SZ];
-        uint16_t copy = (len <= USB_OUTPUT_BUF_SZ) ? len : USB_OUTPUT_BUF_SZ;
-        memcpy(msg, data, copy);
-        if (copy < USB_OUTPUT_BUF_SZ)
-            memset(msg + copy, 0, USB_OUTPUT_BUF_SZ - copy);
-        /* If queue full, drop oldest frame to make room (like DS5Dongle) */
-        if (xQueueIsQueueFullFromISR(output_queue)) {
-            uint8_t dummy[USB_OUTPUT_BUF_SZ];
-            xQueueReceiveFromISR(output_queue, dummy, NULL);
-            out_drop_count++;
-        }
-        out_isr_ts_us = bflb_mtimer_get_time_us();
-        xQueueSendToBackFromISR(output_queue, msg, NULL);
+    if (data[0] != DS5_USB_REPORT_ID_OUTPUT)
+        return;
+
+    uint8_t msg[USB_OUTPUT_BUF_SZ];
+    uint16_t copy = (len <= USB_OUTPUT_BUF_SZ) ? len : USB_OUTPUT_BUF_SZ;
+    memcpy(msg, data, copy);
+    if (copy < USB_OUTPUT_BUF_SZ)
+        memset(msg + copy, 0, USB_OUTPUT_BUF_SZ - copy);
+    if (xQueueIsQueueFullFromISR(output_queue)) {
+        uint8_t dummy[USB_OUTPUT_BUF_SZ];
+        xQueueReceiveFromISR(output_queue, dummy, NULL);
+        out_drop_count++;
     }
+    out_isr_ts_us = bflb_mtimer_get_time_us();
+    xQueueSendToBackFromISR(output_queue, msg, NULL);
 }
 
 /* ---- FreeRTOS tasks ---- */
@@ -695,6 +723,11 @@ static void bt_task(void *arg)
 
         bt_hid_host_persist_if_dirty();
 
+        if (usb_wake_radio_wake_pending()) {
+            bt_hid_host_radio_wake();
+            LOG_INF("[MAIN] Radio wake — BT scan re-enabled after standby\n");
+        }
+
         /* Periodic RSSI read (~every 5 s) */
         {
             static uint16_t rssi_tick = 0;
@@ -717,6 +750,15 @@ static void bt_task(void *arg)
             }
         } else {
             disconnecting_since = 0;
+        }
+
+        /* Deferred USB soft-disconnect: if BT disconnected and no reconnection
+         * within the timeout, pull USB so Windows removes the phantom device. */
+        if (usb_deferred_disc_us && !ds5_connected &&
+            (bflb_mtimer_get_time_us() - usb_deferred_disc_us) > USB_DEFERRED_DISC_US) {
+            usb_deferred_disc_us = 0;
+            usb_soft_disconnect();
+            LOG_INF("[MAIN] Deferred USB disconnect (no reconnect within 15s)\n");
         }
 
         if (bt_hid_host_poll_scan_early()) {
@@ -815,15 +857,18 @@ static void bt_task(void *arg)
              * Each USB output frame is independently forwarded to BT with
              * only config overlays applied — no flag accumulation or merging. */
             if (state_mgr_is_spk_active()) {
+                int batch = 0;
                 while (xQueueReceive(output_queue, usb_out, 0) == pdTRUE) {
                     uint8_t *payload = usb_out + 1;
                     apply_config_overlay(payload, DS5_USB_OUTPUT_PAYLOAD_LEN);
                     cache_output_state(payload);
+
                     uint8_t bt_out[DS5_BT_OUTPUT_REPORT_SIZE];
                     build_bt_output(payload, DS5_USB_OUTPUT_PAYLOAD_LEN,
                                     output_seq, bt_out);
                     output_seq = (output_seq + 1) & 0x0F;
                     bt_hid_host_send_output(bt_out, DS5_BT_OUTPUT_REPORT_SIZE);
+                    batch++;
                 }
                 vTaskDelay(pdMS_TO_TICKS(16));
             } else if (xQueueReceive(output_queue, usb_out, pdMS_TO_TICKS(16)) == pdTRUE) {
@@ -838,6 +883,7 @@ static void bt_task(void *arg)
                     if (stealth_primer_countdown == 0) {
                         LOG_INF("[MAIN] Stealth: primer fired, forwarding starts\n");
                         send_led_primer();
+                        primer_resend_us = bflb_mtimer_get_time_us();
                     } else {
                         LOG_INF("[MAIN] Stealth: holding BT forward, countdown=%d\n",
                                 (int)stealth_primer_countdown);
@@ -847,6 +893,7 @@ static void bt_task(void *arg)
 
                 apply_config_overlay(payload, DS5_USB_OUTPUT_PAYLOAD_LEN);
                 cache_output_state(payload);
+
                 uint8_t bt_out[DS5_BT_OUTPUT_REPORT_SIZE];
                 build_bt_output(payload, DS5_USB_OUTPUT_PAYLOAD_LEN,
                                 output_seq, bt_out);
@@ -911,7 +958,7 @@ next_output_iter:;
             }
 
             if (bt_hid_host_get_state() == BT_HID_STATE_IDLE &&
-                idle_ticks >= 20) {
+                idle_ticks >= 20 && !usb_wake_host_suspended()) {
                 if (bt_hid_host_has_pending_conn()) {
                     if (stale_conn_since == 0)
                         stale_conn_since = bflb_mtimer_get_time_us();
@@ -1002,31 +1049,47 @@ static void usb_task(void *arg)
 
 #define CONN_WATCHDOG_US (3ULL * 1000000ULL)  /* 3 seconds without input → force disconnect */
 
-    /* PS shortcut state (Win+G short / Win+Tab long, with debounce) */
+    /* PS shortcut state (short press → Win+G, with debounce) */
     bool     ps_debounced    = false;
     bool     ps_was_pressed  = false;
-    bool     ps_long_fired   = false;
     bool     ps_key_pending  = false;
+    bool     ps_key_scheduled = false;
     uint64_t ps_last_high_us = 0;
     uint64_t ps_press_us     = 0;
     uint64_t ps_key_rel_us   = 0;
+    uint64_t ps_key_sched_us = 0;
+
+    /* Remap profile switch: Create + D-pad Left/Right */
+    bool     remap_combo_fired = false;
+
+    /* Volume combo: Options + D-pad Up/Down → Consumer Control Volume */
+    bool     vol_key_active = false;
+    uint64_t vol_repeat_us  = 0;
+    #define VOL_REPEAT_FIRST_MS  400
+    #define VOL_REPEAT_NEXT_MS   120
+    #define CC_VOL_UP    0x01   /* bitmap bit0 = Volume Increment */
+    #define CC_VOL_DOWN  0x02   /* bitmap bit1 = Volume Decrement */
 
     for (;;) {
         /* Periodic USB status check (every ~10 seconds) */
         if (++usb_check_cnt >= 10000) {
             usb_check_cnt = 0;
-            volatile uint32_t *phy_tst  = (volatile uint32_t *)(USB_BASE + 0x114);
-            volatile uint32_t *dev_ctl  = (volatile uint32_t *)(USB_BASE + 0x100);
-            volatile uint32_t *glb_int  = (volatile uint32_t *)(USB_BASE + 0x0C4);
             LOG_DBG("[USB-MON] UNPLUG=%d GLINT=%d FORCE_FS=%d "
                    "DEV_CTL=0x%08lx GLB_INT=0x%08lx\n",
-                   (int)(*phy_tst & 1),
-                   (int)((*dev_ctl >> 2) & 1),
-                   (int)((*dev_ctl >> 9) & 1),
-                   (unsigned long)*dev_ctl,
-                   (unsigned long)*glb_int);
+                   (int)(*(volatile uint32_t *)(USB_BASE + 0x114) & 1),
+                   (int)((*(volatile uint32_t *)(USB_BASE + 0x100) >> 2) & 1),
+                   (int)((*(volatile uint32_t *)(USB_BASE + 0x100) >> 9) & 1),
+                   (unsigned long)*(volatile uint32_t *)(USB_BASE + 0x100),
+                   (unsigned long)*(volatile uint32_t *)(USB_BASE + 0x0C4));
         }
         usb_gamepad_process_deferred();
+
+        if (primer_resend_us && ds5_connected &&
+            stealth_primer_countdown == 0 &&
+            (bflb_mtimer_get_time_us() - primer_resend_us) > PRIMER_RESEND_DELAY_US) {
+            primer_resend_us = 0;
+            send_led_primer();
+        }
 
         /* Connection watchdog: if connected and we've received at least one
          * report, but then nothing for 3s → controller likely powered off.
@@ -1049,7 +1112,44 @@ static void usb_task(void *arg)
                 LOG_DBG("[USB-FWD] %lu reports forwarded\n",
                        (unsigned long)usb_fwd_count);
 
-            remap_kbd_tick(raw_report + 2);
+            /* Volume combo: Options(≡) + D-pad Up/Down → Consumer Control Vol.
+             * Detect BEFORE remap so we can suppress both buttons from gamepad. */
+            {
+                bool opt_held = (raw_report[2 + DS5_BTN_BYTE] & DS5_BTN_OPTIONS_BIT) != 0;
+                uint8_t dv = raw_report[2 + DS5_DPAD_BYTE] & DS5_DPAD_MASK;
+                uint16_t vu = 0;
+                if (opt_held) {
+                    if (dv == DS5_DPAD_N) vu = CC_VOL_UP;
+                    else if (dv == DS5_DPAD_S) vu = CC_VOL_DOWN;
+                }
+
+                uint64_t vt = bflb_mtimer_get_time_us();
+                if (vu && usb_gamepad_kbd_ready()) {
+                    if (!vol_key_active) {
+                        usb_gamepad_send_consumer_report(vu);
+                        vol_key_active = true;
+                        vol_repeat_us = vt + VOL_REPEAT_FIRST_MS * 1000ULL;
+                    } else if (vt >= vol_repeat_us) {
+                        usb_gamepad_send_consumer_report(0);
+                        for (int w = 0; w < 15 && !usb_gamepad_kbd_ready(); w++)
+                            vTaskDelay(pdMS_TO_TICKS(1));
+                        usb_gamepad_send_consumer_report(vu);
+                        vol_repeat_us = bflb_mtimer_get_time_us() + VOL_REPEAT_NEXT_MS * 1000ULL;
+                    }
+                } else if (vol_key_active) {
+                    if (usb_gamepad_kbd_ready())
+                        usb_gamepad_send_consumer_report(0);
+                    vol_key_active = false;
+                }
+
+                if (vol_key_active) {
+                    raw_report[2 + DS5_BTN_BYTE] &= ~DS5_BTN_OPTIONS_BIT;
+                    raw_report[2 + DS5_DPAD_BYTE] = (raw_report[2 + DS5_DPAD_BYTE] & ~DS5_DPAD_MASK) | DS5_DPAD_NONE;
+                }
+            }
+
+            if (!vol_key_active)
+                remap_kbd_tick(raw_report + 2);
             remap_apply(raw_report + 2);
             usb_gamepad_send_raw_input(raw_report + 2);
             usb_wake_on_bt_input(raw_report + 2, DS5_USB_INPUT_PAYLOAD_LEN);
@@ -1057,7 +1157,9 @@ static void usb_task(void *arg)
             /* Headset plug detection for audio tag switching (0x93 vs 0x96) */
             audio_set_headset((raw_report[2 + DS5_HEADSET_BYTE] & 1) != 0);
 
-            /* Mic mute button → toggle MuteLight on controller */
+            /* Mic mute button → toggle MuteLight on controller.
+             * Controller toggles status_bit only when a game has activated
+             * the mic — this is normal PS5 behavior. */
             {
                 static uint8_t prev_mic_bit = 0xFF;
                 uint8_t cur_mic_bit = (raw_report[2 + DS5_HEADSET_BYTE] >> 2) & 1;
@@ -1065,7 +1167,7 @@ static void usb_task(void *arg)
                     uint8_t mute_state[DS5_USB_OUTPUT_PAYLOAD_LEN];
                     memset(mute_state, 0, sizeof(mute_state));
                     mute_state[1] = 0x01;  /* flags1: AllowMuteLight */
-                    mute_state[8] = cur_mic_bit ? 0x01 : 0x00; /* MuteLightMode */
+                    mute_state[8] = cur_mic_bit ? 0x01 : 0x00;
                     uint8_t pkt[DS5_BT_OUTPUT_EXT_SIZE];
                     build_bt_output_ext(mute_state, DS5_USB_OUTPUT_PAYLOAD_LEN, pkt);
                     bt_hid_host_send_output(pkt, DS5_BT_OUTPUT_EXT_SIZE);
@@ -1120,10 +1222,43 @@ static void usb_task(void *arg)
                     }
                 }
 
-                /* PS key release runs unconditionally (prevents stuck key
-                 * if config changes while a keystroke is in flight) */
+                /* Remap profile switch: Create + D-pad Left → profile 0, Right → profile 1 */
+                {
+                    bool create_held = (raw_report[2 + DS5_BTN_BYTE] & DS5_BTN_CREATE_BIT) != 0;
+                    uint8_t dpad = raw_report[2 + DS5_DPAD_BYTE] & DS5_DPAD_MASK;
+
+                    if (create_held && !remap_combo_fired) {
+                        int target = -1;
+                        if (dpad == DS5_DPAD_W)
+                            target = 0;
+                        else if (dpad == DS5_DPAD_E)
+                            target = 1;
+
+                        if (target >= 0 && target != remap_get_active_profile()) {
+                            remap_switch_profile((uint8_t)target);
+                            led_status_set(target == 0 ? LED_BLINK_ONCE : LED_BLINK_DOUBLE);
+                            LOG_INF("[REMAP] Combo → profile %d\n", target);
+                            remap_combo_fired = true;
+                        }
+                    }
+                    if (!create_held)
+                        remap_combo_fired = false;
+                }
+
+                /* PS key scheduled send + release (runs unconditionally) */
                 {
                     uint64_t now_us = bflb_mtimer_get_time_us();
+
+                    if (ps_key_scheduled && now_us >= ps_key_sched_us &&
+                        usb_gamepad_kbd_ready()) {
+                        uint8_t kbd[8] = {0x08, 0, 0x0A, 0, 0, 0, 0, 0};
+                        usb_gamepad_send_kbd_report(kbd, sizeof(kbd));
+                        LOG_INF("[PS] Short press -> Win+G (delayed)\n");
+                        ps_key_pending = true;
+                        ps_key_rel_us = now_us + 30000ULL;
+                        ps_key_scheduled = false;
+                    }
+
                     if (ps_key_pending && now_us >= ps_key_rel_us) {
                         if (usb_gamepad_kbd_ready()) {
                             uint8_t up[8] = {0};
@@ -1133,10 +1268,9 @@ static void usb_task(void *arg)
                     }
 
                     /*
-                     * PS shortcut (matches DS5Dongle ps_shortcut.cpp):
-                     *   short press → Win+G  (Game Bar)
-                     *   long press ≥ 750ms → Win+Tab (Task View)
-                     *   50ms debounce, 30ms key hold before release
+                     * PS shortcut: short press → Win+G (Game Bar)
+                     * Long press removed — conflicts with controller disconnect.
+                     * 50ms debounce, 30ms key hold before release.
                      */
                     if (config_ps_shortcut()) {
                         bool raw_ps = (raw_report[2 + DS5_BTN_PS_BYTE] &
@@ -1152,37 +1286,12 @@ static void usb_task(void *arg)
                         if (ps_debounced && !ps_was_pressed) {
                             ps_press_us = now_us;
                             ps_was_pressed = true;
-                            ps_long_fired = false;
-                        } else if (ps_debounced && ps_was_pressed) {
-                            if (!ps_long_fired &&
-                                (now_us - ps_press_us >= 750000ULL) &&
-                                usb_gamepad_kbd_ready()) {
-                                uint8_t kbd[8] = {0x08, 0, 0x2B,
-                                                  0, 0, 0, 0, 0};
-                                usb_gamepad_send_kbd_report(kbd, sizeof(kbd));
-                                LOG_INF("[PS] Hold -> Win+Tab\n");
-                                ps_long_fired = true;
-                                ps_key_pending = true;
-                                ps_key_rel_us = now_us + 30000ULL;
-                            }
                         } else if (!ps_debounced && ps_was_pressed) {
-                            if (!ps_long_fired &&
-                                usb_gamepad_kbd_ready()) {
-                                if (now_us - ps_press_us >= 750000ULL) {
-                                    uint8_t kbd[8] = {0x08, 0, 0x2B,
-                                                      0, 0, 0, 0, 0};
-                                    usb_gamepad_send_kbd_report(kbd,
-                                                                sizeof(kbd));
-                                    LOG_INF("[PS] Long press -> Win+Tab\n");
-                                } else {
-                                    uint8_t kbd[8] = {0x08, 0, 0x0A,
-                                                      0, 0, 0, 0, 0};
-                                    usb_gamepad_send_kbd_report(kbd,
-                                                                sizeof(kbd));
-                                    LOG_INF("[PS] Short press -> Win+G\n");
-                                }
-                                ps_key_pending = true;
-                                ps_key_rel_us = now_us + 30000ULL;
+                            if (now_us - ps_press_us < 500000ULL) {
+                                /* Delay Win+G 150ms after release so host
+                                 * processes Guide button release first. */
+                                ps_key_sched_us = now_us + 150000ULL;
+                                ps_key_scheduled = true;
                             }
                             ps_was_pressed = false;
                         }
@@ -1198,11 +1307,13 @@ static void usb_task(void *arg)
             last_activity_us = bflb_mtimer_get_time_us();
             inactive_disconnected = false;
             ps_debounced = false;
-            if (ps_was_pressed)
-                ps_was_pressed = false;
-            if (ps_key_pending && usb_gamepad_kbd_ready()) {
-                uint8_t up[8] = {0};
-                usb_gamepad_send_kbd_report(up, sizeof(up));
+            ps_key_scheduled = false;
+            ps_was_pressed = false;
+            if (ps_key_pending) {
+                if (usb_gamepad_kbd_ready()) {
+                    uint8_t up[8] = {0};
+                    usb_gamepad_send_kbd_report(up, sizeof(up));
+                }
                 ps_key_pending = false;
             }
         }

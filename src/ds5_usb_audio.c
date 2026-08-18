@@ -462,6 +462,7 @@ bool usb_audio_mic_is_active(void)
     return mic_active;
 }
 
+
 void usb_audio_mic_stop(void)
 {
     mic_active  = false;

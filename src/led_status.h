@@ -11,6 +11,7 @@ enum led_pattern {
     LED_BLUE_SOLID,        /* Blue solid */
     LED_RED_BLINK,         /* Red blink — just disconnected, auto→purple */
     LED_BLINK_ONCE,        /* Single flash — event acknowledge */
+    LED_BLINK_DOUBLE,      /* Double flash — remap profile 2 */
     LED_BLINK_TRIPLE,      /* Triple flash — bonds cleared */
     LED_BLINK_BATTERY,     /* Red blink — critical battery (<=10%) */
     LED_BLINK_BATTERY_WARN,/* Yellow blink — low battery (<=20%) */

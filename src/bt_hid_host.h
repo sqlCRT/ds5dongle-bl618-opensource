@@ -281,4 +281,18 @@ int bt_hid_host_read_rssi(int8_t *rssi);
  */
 int8_t bt_hid_host_get_cached_rssi(void);
 
+/**
+ * Disable page scan + inquiry scan to silence the BT radio.
+ * Call when USB host is confirmed offline (e.g. sustained SUSPEND after
+ * controller power-off) to reduce power consumption / heat.
+ * Re-enabled automatically on next bt_hid_host_try_reconnect() or scan_start().
+ */
+void bt_hid_host_radio_idle(void);
+
+/**
+ * Re-enable page scan + inquiry scan after radio_idle.
+ * Also triggers reconnection attempt. Call from task context only.
+ */
+void bt_hid_host_radio_wake(void);
+
 #endif /* BT_HID_HOST_H */

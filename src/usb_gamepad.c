@@ -23,9 +23,9 @@
 
 #if defined(BOARD_LCTECH_616)
   #ifdef FORCE_FS_MODE
-    #define FIRMWARE_VERSION "LCT616-DS5 3.16"
+    #define FIRMWARE_VERSION "LCT616-DS5 3.17"
   #else
-    #define FIRMWARE_VERSION "LCT616-DS5 3.16H"
+    #define FIRMWARE_VERSION "LCT616-DS5 3.17H"
   #endif
 #elif defined(BOARD_M0S_DOCK)
 #define FIRMWARE_VERSION "M0S-DS5 3.5"
@@ -36,20 +36,22 @@
 #define USBD_MAX_POWER      250
 #define USBD_LANGID         0x0409
 
-/* Config(9) + Audio(186) + Gamepad(9+9+7+7) + Keyboard(9+9+7) = 252 */
+/* Config(9) + Audio(186) + Gamepad(9+9+7) + Keyboard(9+9+7) = 245 */
 #define USB_KBD_DESC_SIZE  25   /* intf(9) + HID(9) + EP_IN(7) */
-#define USB_HID_ONLY_SIZE (9 + 9 + 7 + 7 + USB_KBD_DESC_SIZE)
+#define USB_HID_ONLY_SIZE (9 + 9 + 7 + USB_KBD_DESC_SIZE)
 #define USB_AUDIO_DESC_SIZE 186
 #define USB_HID_CONFIG_SIZE (9 + USB_AUDIO_DESC_SIZE + USB_HID_ONLY_SIZE)
 #define HID_REPORT_DESC_SIZE_DS  329
 #define HID_REPORT_DESC_SIZE_DSE 445
-#define KBD_REPORT_DESC_SIZE 45
+#define KBD_REPORT_DESC_SIZE 80
 
 static bool current_dse_mode = false;
 
 static volatile bool usb_config_save_pending = false;
 static volatile bool usb_reset_pending = false;
 static volatile bool usb_remap_save_pending  = false;
+static volatile uint8_t usb_remap_save_profile = 0;
+static uint8_t remap_read_profile = 0;
 static bool first_usb_send_logged = false;
 
 #define SET_REPORT_MAX_DATA    64
@@ -314,11 +316,13 @@ static const uint8_t hid_report_desc_dse[HID_REPORT_DESC_SIZE_DSE] = {
     0xC0,
 };
 
-/* Boot-keyboard report descriptor (45 bytes, no Report ID) */
+/* Multi-TLC HID report descriptor: Keyboard (Report ID 1) + Consumer Control (Report ID 2) */
 static const uint8_t kbd_report_desc[KBD_REPORT_DESC_SIZE] = {
+    /* ── Collection 1: Keyboard (Report ID 1, 9 bytes total) ── */
     0x05, 0x01,       /* Usage Page (Generic Desktop) */
     0x09, 0x06,       /* Usage (Keyboard) */
     0xA1, 0x01,       /* Collection (Application) */
+    0x85, 0x01,       /*   Report ID (1) */
     0x05, 0x07,       /*   Usage Page (Keyboard/Keypad) */
     0x19, 0xE0,       /*   Usage Minimum (Left Control) */
     0x29, 0xE7,       /*   Usage Maximum (Right GUI) */
@@ -333,11 +337,29 @@ static const uint8_t kbd_report_desc[KBD_REPORT_DESC_SIZE] = {
     0x95, 0x06,       /*   Report Count (6) */
     0x75, 0x08,       /*   Report Size (8) */
     0x15, 0x00,       /*   Logical Minimum (0) */
-    0x25, 0x65,       /*   Logical Maximum (101) */
+    0x26, 0xFF, 0x00, /*   Logical Maximum (255) */
     0x05, 0x07,       /*   Usage Page (Keyboard/Keypad) */
     0x19, 0x00,       /*   Usage Minimum (0) */
-    0x29, 0x65,       /*   Usage Maximum (101) */
+    0x2A, 0xFF, 0x00, /*   Usage Maximum (255) */
     0x81, 0x00,       /*   Input (Data,Array) — 6 keycodes */
+    0xC0,             /* End Collection */
+
+    /* ── Collection 2: Consumer Control (Report ID 2, 1 byte bitmap) ── */
+    0x05, 0x0C,       /* Usage Page (Consumer) */
+    0x09, 0x01,       /* Usage (Consumer Control) */
+    0xA1, 0x01,       /* Collection (Application) */
+    0x85, 0x02,       /*   Report ID (2) */
+    0x15, 0x00,       /*   Logical Minimum (0) */
+    0x25, 0x01,       /*   Logical Maximum (1) */
+    0x75, 0x01,       /*   Report Size (1) */
+    0x95, 0x03,       /*   Report Count (3) — 3 bits: VolUp, VolDn, Mute */
+    0x09, 0xE9,       /*   Usage (Volume Increment) — bit 0 */
+    0x09, 0xEA,       /*   Usage (Volume Decrement) — bit 1 */
+    0x09, 0xE2,       /*   Usage (Mute)             — bit 2 */
+    0x81, 0x02,       /*   Input (Data,Var,Abs) */
+    0x95, 0x01,       /*   Report Count (1) */
+    0x75, 0x05,       /*   Report Size (5) — padding */
+    0x81, 0x01,       /*   Input (Const) */
     0xC0,             /* End Collection */
 };
 
@@ -391,7 +413,7 @@ static uint8_t config_desc[USB_HID_CONFIG_SIZE] = {
     0x09, 0x04,
     USB_INTF_GAMEPAD,        /* bInterfaceNumber: 2 */
     0x00,                    /* bAlternateSetting */
-    0x02,                    /* bNumEndpoints */
+    0x01,                    /* bNumEndpoints: IN only (OUT via EP0 SET_REPORT) */
     0x03,                    /* bInterfaceClass: HID */
     0x00,                    /* bInterfaceSubClass */
     0x00,                    /* bInterfaceProtocol */
@@ -408,13 +430,6 @@ static uint8_t config_desc[USB_HID_CONFIG_SIZE] = {
     /* EP IN (Gamepad) */
     0x07, 0x05,
     USB_GAMEPAD_EP_IN,       /* bEndpointAddress */
-    0x03,                    /* bmAttributes: Interrupt */
-    USB_GAMEPAD_EP_MPS, 0x00,
-    USB_GAMEPAD_INTERVAL_MS,
-
-    /* EP OUT (Gamepad) */
-    0x07, 0x05,
-    USB_GAMEPAD_EP_OUT,
     0x03,                    /* bmAttributes: Interrupt */
     USB_GAMEPAD_EP_MPS, 0x00,
     USB_GAMEPAD_INTERVAL_MS,
@@ -541,7 +556,8 @@ static const struct usb_descriptor usb_desc = {
 /* Gamepad interface / endpoints */
 static struct usbd_interface hid_intf;
 static struct usbd_endpoint  hid_ep_in;
-static struct usbd_endpoint  hid_ep_out;
+/* EP OUT removed: output reports arrive via EP0 SET_REPORT to avoid
+ * FIFO F2 sharing conflict with keyboard EP3 IN. */
 
 /* Keyboard interface / endpoint */
 static struct usbd_interface kbd_intf;
@@ -559,7 +575,6 @@ static void (*hook_suspend)(void)    = NULL;
 static void (*hook_resume)(void)     = NULL;
 static void (*hook_configured)(void) = NULL;
 
-static USB_NOCACHE_RAM_SECTION uint8_t ep_out_rx_buf[USB_GAMEPAD_EP_MPS];
 static USB_NOCACHE_RAM_SECTION uint8_t usb_in_buf[64];
 static USB_NOCACHE_RAM_SECTION uint8_t kbd_buf[USB_KBD_EP_MPS];
 
@@ -602,24 +617,6 @@ static void kbd_ep_in_handler(uint8_t busid, uint8_t ep, uint32_t nbytes)
     kbd_ep_busy_since_us = 0;
 }
 
-static bool first_epout_logged = false;
-
-ATTR_TCM_SECTION
-static void hid_ep_out_handler(uint8_t busid, uint8_t ep, uint32_t nbytes)
-{
-    (void)ep;
-    if (nbytes > 0 && output_callback) {
-        if (!first_epout_logged) {
-            first_epout_logged = true;
-            LOG_DBG("[USB-OUT] First EP OUT: rid=0x%02x len=%lu\n",
-                   ep_out_rx_buf[0], (unsigned long)nbytes);
-        }
-        output_callback(ep_out_rx_buf, nbytes);
-    }
-    usbd_ep_start_read(busid, USB_GAMEPAD_EP_OUT,
-                       ep_out_rx_buf, sizeof(ep_out_rx_buf));
-}
-
 static void usbd_event_handler(uint8_t busid, uint8_t event)
 {
     switch (event) {
@@ -627,8 +624,6 @@ static void usbd_event_handler(uint8_t busid, uint8_t event)
         usb_configured = true;
         ep_in_busy = false;
         kbd_ep_busy = false;
-        usbd_ep_start_read(busid, USB_GAMEPAD_EP_OUT,
-                           ep_out_rx_buf, sizeof(ep_out_rx_buf));
         LOG_INF("[USB-EVT] CONFIGURED — host enumeration complete!\n");
         if (hook_configured)
             hook_configured();
@@ -638,7 +633,6 @@ static void usbd_event_handler(uint8_t busid, uint8_t event)
         ep_in_busy = false;
         kbd_ep_busy = false;
         first_usb_send_logged = false;
-        first_epout_logged = false;
         usb_audio_stop();
         usb_audio_mic_stop();
         audio_set_mic_active(false);
@@ -660,8 +654,6 @@ static void usbd_event_handler(uint8_t busid, uint8_t event)
         usb_configured = true;
         ep_in_busy = false;
         kbd_ep_busy = false;
-        usbd_ep_start_read(busid, USB_GAMEPAD_EP_OUT,
-                           ep_out_rx_buf, sizeof(ep_out_rx_buf));
         LOG_INF("[USB-EVT] RESUME\n");
         if (hook_resume)
             hook_resume();
@@ -717,8 +709,8 @@ void usb_gamepad_process_deferred(void)
     }
     if (usb_remap_save_pending) {
         usb_remap_save_pending = false;
-        remap_save();
-        LOG_INF("[USB] Remap table saved to flash\n");
+        remap_save_profile(usb_remap_save_profile);
+        LOG_INF("[USB] Remap profile %d saved to flash\n", usb_remap_save_profile);
     }
 
     uint8_t frid = pending_feature_rid;
@@ -762,18 +754,11 @@ int usb_gamepad_init(usb_gamepad_output_cb_t output_cb)
      * REMOTE-WAKEUP bit stays in bmAttributes when wake is enabled. */
     const bool need_kbd = remap_has_kbd_targets() ||
                           config_get()->ps_shortcut_enabled;
-    const bool need_boot_kbd = need_kbd;
     const bool need_remote_wake = config_get()->enable_wake || need_kbd;
     if (need_kbd) {
-        if (need_boot_kbd) {
-            config_desc[KBD_SUBCLASS_OFF] = 0x01; /* Boot Interface Subclass */
-            config_desc[KBD_PROTOCOL_OFF] = 0x01; /* Keyboard — loads kbdhid.sys */
-            LOG_INF("[USB-INIT] Keyboard intf: INCLUDED (Boot, ps-shortcut)\n");
-        } else {
-            config_desc[KBD_SUBCLASS_OFF] = 0x00;
-            config_desc[KBD_PROTOCOL_OFF] = 0x00;
-            LOG_INF("[USB-INIT] Keyboard intf: INCLUDED (non-Boot)\n");
-        }
+        config_desc[KBD_SUBCLASS_OFF] = 0x00; /* No subclass (multi-TLC, not pure boot) */
+        config_desc[KBD_PROTOCOL_OFF] = 0x00; /* None — keyboard + consumer control */
+        LOG_INF("[USB-INIT] Keyboard+CC intf: INCLUDED\n");
         config_desc[7] = need_remote_wake ? 0xE0 : 0xC0;
         /* wTotalLength and bNumInterfaces stay at compiled-in max */
     } else {
@@ -815,17 +800,14 @@ int usb_gamepad_init(usb_gamepad_output_cb_t output_cb)
     hid_ep_in.ep_cb = hid_ep_in_handler;
     usbd_add_endpoint(0, &hid_ep_in);
 
-    hid_ep_out.ep_addr = USB_GAMEPAD_EP_OUT;
-    hid_ep_out.ep_cb = hid_ep_out_handler;
-    usbd_add_endpoint(0, &hid_ep_out);
 
     if (need_kbd) {
         kbd_ep_in.ep_addr = USB_KBD_EP_IN;
         kbd_ep_in.ep_cb = kbd_ep_in_handler;
         usbd_add_endpoint(0, &kbd_ep_in);
     }
-    LOG_INF("[USB-INIT] Endpoints: GP_IN=0x%02x GP_OUT=0x%02x KBD_IN=0x%02x\n",
-           USB_GAMEPAD_EP_IN, USB_GAMEPAD_EP_OUT, need_kbd ? USB_KBD_EP_IN : 0);
+    LOG_INF("[USB-INIT] Endpoints: GP_IN=0x%02x KBD_IN=0x%02x (OUT via EP0)\n",
+           USB_GAMEPAD_EP_IN, need_kbd ? USB_KBD_EP_IN : 0);
 
     /* Read registers BEFORE usbd_initialize */
     {
@@ -941,14 +923,28 @@ int usb_gamepad_send_kbd_report(const uint8_t *report, uint8_t len)
 {
     if (!usb_configured || !kbd_registered || kbd_ep_busy)
         return -1;
-    if (len > USB_KBD_EP_MPS)
-        len = USB_KBD_EP_MPS;
-    memcpy(kbd_buf, report, len);
-    if (len < USB_KBD_EP_MPS)
-        memset(kbd_buf + len, 0, USB_KBD_EP_MPS - len);
+    kbd_buf[0] = 0x01; /* Report ID 1 = Keyboard */
+    uint8_t copy = (len > 8) ? 8 : len;
+    memcpy(kbd_buf + 1, report, copy);
+    if (copy < 8)
+        memset(kbd_buf + 1 + copy, 0, 8 - copy);
     kbd_ep_busy = true;
     kbd_ep_busy_since_us = bflb_mtimer_get_time_us();
-    int ret = usbd_ep_start_write(0, USB_KBD_EP_IN, kbd_buf, USB_KBD_EP_MPS);
+    int ret = usbd_ep_start_write(0, USB_KBD_EP_IN, kbd_buf, 9);
+    if (ret < 0)
+        kbd_ep_busy = false;
+    return ret;
+}
+
+int usb_gamepad_send_consumer_report(uint16_t bits)
+{
+    if (!usb_configured || !kbd_registered || kbd_ep_busy)
+        return -1;
+    kbd_buf[0] = 0x02; /* Report ID 2 = Consumer Control */
+    kbd_buf[1] = bits & 0xFF; /* bit0=VolUp, bit1=VolDn, bit2=Mute */
+    kbd_ep_busy = true;
+    kbd_ep_busy_since_us = bflb_mtimer_get_time_us();
+    int ret = usbd_ep_start_write(0, USB_KBD_EP_IN, kbd_buf, 2);
     if (ret < 0)
         kbd_ep_busy = false;
     return ret;
@@ -1066,7 +1062,7 @@ void usbd_hid_get_report(uint8_t busid, uint8_t intf, uint8_t report_id,
     if (intf == USB_INTF_KBD) {
         memset(kbd_idle_report, 0, sizeof(kbd_idle_report));
         *data = kbd_idle_report;
-        *len  = sizeof(kbd_idle_report);
+        *len  = (report_id == 0x02) ? 1 : 8; /* CC=1B bitmap, Kbd=8B (no Report ID prefix) */
         return;
     }
 
@@ -1112,11 +1108,15 @@ void usbd_hid_get_report(uint8_t busid, uint8_t intf, uint8_t report_id,
             *len  = 5;
         } else if (report_id == 0xFB) {
             feature_resp_buf[0] = 0xFB;
-            memcpy(feature_resp_buf + 1, remap_get_table(),
+            feature_resp_buf[1] = remap_get_active_profile();
+            feature_resp_buf[2] = remap_read_profile;
+            memcpy(feature_resp_buf + 3,
+                   remap_get_profile_table(remap_read_profile),
                    REMAP_BTN_COUNT * sizeof(remap_entry_t));
             *data = feature_resp_buf;
-            *len  = 1 + REMAP_BTN_COUNT * (int)sizeof(remap_entry_t);
-            LOG_INF("[USB] GET_REPORT(0xFB) → remap table %d bytes\n", *len);
+            *len  = 3 + REMAP_BTN_COUNT * (int)sizeof(remap_entry_t);
+            LOG_INF("[USB] GET_REPORT(0xFB) → profile %d (%d bytes)\n",
+                    remap_read_profile, *len);
         } else {
             *len = 0;
         }
@@ -1192,14 +1192,41 @@ void usbd_hid_set_report(uint8_t busid, uint8_t intf, uint8_t report_id,
     /* Button remap command (0xFB SET) */
     if (report_type == 0x03 && report_id == 0xFB && payload_len > 0) {
         uint8_t cmd = payload[0];
-        if (cmd == 0x01 && payload_len >= 1 + REMAP_BTN_COUNT * sizeof(remap_entry_t)) {
-            remap_set(payload + 1, (uint8_t)(payload_len - 1));
-            usb_remap_save_pending = true;
-            LOG_INF("[USB] CMD 0xFB/0x01: remap table updated (save pending)\n");
+        if (cmd == 0x01) {
+            /* 0x01 [profile] [data...] — set remap for profile */
+            if (payload_len >= 2 + REMAP_BTN_COUNT * sizeof(remap_entry_t)) {
+                uint8_t prof = payload[1];
+                if (prof >= REMAP_PROFILE_COUNT) prof = 0;
+                remap_set_profile(prof, payload + 2, (uint8_t)(payload_len - 2));
+                usb_remap_save_profile = prof;
+                usb_remap_save_pending = true;
+                LOG_INF("[USB] CMD 0xFB/0x01: profile %d updated\n", prof);
+            } else if (payload_len >= 1 + REMAP_BTN_COUNT * sizeof(remap_entry_t)) {
+                /* backward compat: no profile byte → profile 0 */
+                remap_set_profile(0, payload + 1, (uint8_t)(payload_len - 1));
+                usb_remap_save_profile = 0;
+                usb_remap_save_pending = true;
+                LOG_INF("[USB] CMD 0xFB/0x01: profile 0 updated (compat)\n");
+            }
         } else if (cmd == 0x02) {
-            remap_reset();
+            /* 0x02 [profile] — reset profile (optional byte) */
+            uint8_t prof = (payload_len >= 2) ? payload[1] : remap_get_active_profile();
+            if (prof >= REMAP_PROFILE_COUNT) prof = 0;
+            remap_reset_profile(prof);
+            usb_remap_save_profile = prof;
             usb_remap_save_pending = true;
-            LOG_INF("[USB] CMD 0xFB/0x02: remap table reset (save pending)\n");
+            LOG_INF("[USB] CMD 0xFB/0x02: profile %d reset\n", prof);
+        } else if (cmd == 0x03 && payload_len >= 2) {
+            /* 0x03 [profile] — select profile to read on next GET_REPORT */
+            remap_read_profile = payload[1] < REMAP_PROFILE_COUNT ? payload[1] : 0;
+            LOG_INF("[USB] CMD 0xFB/0x03: read_profile → %d\n", remap_read_profile);
+        } else if (cmd == 0x05 && payload_len >= 2) {
+            /* 0x05 [profile] — switch active profile */
+            uint8_t prof = payload[1];
+            if (prof < REMAP_PROFILE_COUNT) {
+                remap_switch_profile(prof);
+                LOG_INF("[USB] CMD 0xFB/0x05: active profile → %d\n", prof);
+            }
         }
         return;
     }
@@ -1224,17 +1251,9 @@ void usbd_hid_set_report(uint8_t busid, uint8_t intf, uint8_t report_id,
     /* DS5Dongle only forwards DSE profile reports (0x60-0x62, 0x80) to BT.
      * All other Feature SET_REPORTs (0x08, 0x09 etc.) are dropped — forwarding
      * 0x08 (BT control) would cause the controller to power-off or re-pair. */
-    if (report_type == 0x03 && !is_dongle_cmd(report_id) && payload_len > 0) {
-        LOG_ISR("[USB-ISR] SET_REPORT(Feature 0x%02x) DROPPED, len=%lu\n",
-               report_id, (unsigned long)payload_len);
-    } else if (report_type == 0x02 && payload_len > 0) {
-        LOG_ISR("[USB-ISR] SET_REPORT(Output 0x%02x) → queue, len=%lu\n",
-               report_id, (unsigned long)payload_len);
+    if (report_type == 0x02 && payload_len > 0) {
         if (output_callback)
             output_callback(report, report_len);
-    } else if (report_type != 0x03) {
-        LOG_ISR("[USB-ISR] SET_REPORT(type=%d id=0x%02x) unhandled, len=%lu\n",
-               report_type, report_id, (unsigned long)payload_len);
     }
 }
 

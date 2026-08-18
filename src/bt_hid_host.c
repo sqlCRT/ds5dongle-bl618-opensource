@@ -2241,3 +2241,17 @@ void bt_hid_host_handshake_tick(void)
         handshake_send_next();
     }
 }
+
+void bt_hid_host_radio_idle(void)
+{
+    bt_br_set_connectable(false);
+    bt_br_set_discoverable(false);
+    LOG_INF("[BT] Radio idle — page/inquiry scan disabled\n");
+}
+
+void bt_hid_host_radio_wake(void)
+{
+    bt_br_set_connectable(true);
+    bt_br_set_discoverable(true);
+    LOG_INF("[BT] Radio wake — page/inquiry scan re-enabled\n");
+}

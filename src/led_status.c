@@ -158,6 +158,16 @@ void led_status_tick(void)
         }
         break;
 
+    case LED_BLINK_DOUBLE:
+        if (tick_count <= 8) {
+            bool on = ((tick_count % 4) < 2);
+            set_blue(on);
+        } else {
+            all_off();
+            current_pattern = LED_OFF;
+        }
+        break;
+
     case LED_BLINK_TRIPLE:
         if (tick_count <= 12) {
             bool on = ((tick_count % 4) < 2);
@@ -325,6 +335,16 @@ void led_status_tick(void)
         }
         break;
 
+    case LED_BLINK_DOUBLE:
+        if (tick_count <= 8) {
+            bool on = ((tick_count % 4) < 2);
+            set_led1(on);
+        } else {
+            all_off();
+            current_pattern = LED_OFF;
+        }
+        break;
+
     case LED_BLINK_TRIPLE:
         if (tick_count <= 12) {
             bool on = ((tick_count % 4) < 2);
@@ -458,6 +478,16 @@ void led_status_tick(void)
         if (tick_count == 1)
             set_led(true);
         else if (tick_count >= 4) {
+            all_off();
+            current_pattern = LED_OFF;
+        }
+        break;
+
+    case LED_BLINK_DOUBLE:
+        if (tick_count <= 8) {
+            bool on = ((tick_count % 4) < 2);
+            set_led(on);
+        } else {
             all_off();
             current_pattern = LED_OFF;
         }

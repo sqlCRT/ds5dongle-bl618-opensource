@@ -103,19 +103,36 @@ void usb_wake_on_suspend(void)
     LOG_INF("[WAKE] USB suspended -> PENDING_PRESS\n");
 }
 
+static volatile bool radio_wake_pending = false;
+
 void usb_wake_on_resume(void)
 {
+    if (poweroff_sent)
+        radio_wake_pending = true;
     host_suspended = false;
     host_resumed = true;
     suspend_at_us = 0;
+    poweroff_sent = false;
     LOG_INF("[WAKE] USB resumed\n");
 }
 
 void usb_wake_on_configured(void)
 {
+    if (poweroff_sent)
+        radio_wake_pending = true;
     host_suspended = false;
     host_resumed = true;
     suspend_at_us = 0;
+    poweroff_sent = false;
+}
+
+bool usb_wake_radio_wake_pending(void)
+{
+    if (radio_wake_pending) {
+        radio_wake_pending = false;
+        return true;
+    }
+    return false;
 }
 
 /* ---- Public API called from FreeRTOS task context ---- */
@@ -178,8 +195,9 @@ void usb_wake_task(void)
     if (suspend_at_us != 0 && host_suspended && !poweroff_sent &&
         now - suspend_at_us >= WAKE_POWEROFF_DEBOUNCE_US) {
         bt_power_off_controller();
+        bt_hid_host_radio_idle();
         poweroff_sent = true;
-        LOG_INF("[WAKE] Suspend debounce elapsed -> controller power off\n");
+        LOG_INF("[WAKE] Suspend debounce elapsed -> controller power off + radio idle\n");
     }
 
     switch (state) {

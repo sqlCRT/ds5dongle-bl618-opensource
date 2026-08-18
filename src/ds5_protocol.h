@@ -51,7 +51,12 @@
 #define DS5_BATT_LOW_THRESHOLD    1    /* PowerPercent <= 1 → ≤ 10% */
 #define DS5_BATT_WARN_THRESHOLD   2    /* PowerPercent <= 2 → ≤ 20% */
 
-#define DS5_BTN_PS_BYTE           9    /* offset in 63-byte USB payload */
+#define DS5_BTN_BYTE              8    /* offset in 63-byte USB payload */
+#define DS5_BTN_CREATE_BIT        0x10
+#define DS5_BTN_OPTIONS_BIT       0x20
+#define DS5_DPAD_BYTE             7    /* dpad in lower nibble */
+#define DS5_DPAD_MASK             0x0F
+#define DS5_BTN_PS_BYTE           9
 #define DS5_BTN_PS_BIT            0x01
 
 enum ds5_dpad {
