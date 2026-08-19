@@ -81,6 +81,51 @@ static void exp_rotation1(celt_norm *X, int len, int stride, opus_val16 c, opus_
    Xptr = X;
    ms = NEG16(s);
    norm_scaledown(X, len, NORM_SHIFT-14);
+#if defined(E907_OPUS_DSP)
+   {
+      opus_uint32 packed_sc;
+      opus_uint32 packed_cms;
+      __asm__ volatile("pkbb16 %0, %1, %2"
+                       : "=r"(packed_sc)
+                       : "r"((opus_int32)s), "r"((opus_int32)c));
+      __asm__ volatile("pkbb16 %0, %1, %2"
+                       : "=r"(packed_cms)
+                       : "r"((opus_int32)c), "r"((opus_int32)ms));
+      for (i=0;i<len-stride;i++)
+      {
+         opus_uint32 packed_x;
+         opus_val32 rot1, rot2;
+         __asm__ volatile("pkbb16 %0, %1, %2"
+                          : "=r"(packed_x)
+                          : "r"(Xptr[0]), "r"(Xptr[stride]));
+         __asm__ volatile("kmda %0, %1, %2"
+                          : "=r"(rot2)
+                          : "r"(packed_x), "r"(packed_sc));
+         __asm__ volatile("kmda %0, %1, %2"
+                          : "=r"(rot1)
+                          : "r"(packed_x), "r"(packed_cms));
+         Xptr[stride] = EXTRACT16(PSHR32(rot2, 15));
+         *Xptr++      = EXTRACT16(PSHR32(rot1, 15));
+      }
+      Xptr = &X[len-2*stride-1];
+      for (i=len-2*stride-1;i>=0;i--)
+      {
+         opus_uint32 packed_x;
+         opus_val32 rot1, rot2;
+         __asm__ volatile("pkbb16 %0, %1, %2"
+                          : "=r"(packed_x)
+                          : "r"(Xptr[0]), "r"(Xptr[stride]));
+         __asm__ volatile("kmda %0, %1, %2"
+                          : "=r"(rot2)
+                          : "r"(packed_x), "r"(packed_sc));
+         __asm__ volatile("kmda %0, %1, %2"
+                          : "=r"(rot1)
+                          : "r"(packed_x), "r"(packed_cms));
+         Xptr[stride] = EXTRACT16(PSHR32(rot2, 15));
+         *Xptr--      = EXTRACT16(PSHR32(rot1, 15));
+      }
+   }
+#else
    for (i=0;i<len-stride;i++)
    {
       celt_norm x1, x2;
@@ -98,6 +143,7 @@ static void exp_rotation1(celt_norm *X, int len, int stride, opus_val16 c, opus_
       Xptr[stride] = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x2),  s, x1), 15));
       *Xptr--      = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x1), ms, x2), 15));
    }
+#endif
    norm_scaleup(X, len, NORM_SHIFT-14);
 }
 #endif /* OVERRIDE_vq_exp_rotation1 */

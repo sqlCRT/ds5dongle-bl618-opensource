@@ -27,15 +27,18 @@
 #include "debug_log.h"
 #include <string.h>
 
-#define BT_TASK_STACK_SIZE    12288
+#define STACK_WORDS(bytes) \
+    (((bytes) + sizeof(StackType_t) - 1) / sizeof(StackType_t))
+
+#define BT_TASK_STACK_SIZE    STACK_WORDS(12288)
 #define BT_TASK_PRIORITY      (configMAX_PRIORITIES - 2)
-#define USB_TASK_STACK_SIZE   6144
+#define USB_TASK_STACK_SIZE   STACK_WORDS(6144)
 #define USB_TASK_PRIORITY     (configMAX_PRIORITIES - 1)
-#define AUDIO_TASK_STACK_SIZE 8192
+#define AUDIO_TASK_STACK_SIZE STACK_WORDS(1024*32)
 #define AUDIO_TASK_PRIORITY   (configMAX_PRIORITIES - 1)
-#define MIC_TASK_STACK_SIZE   4096
+#define MIC_TASK_STACK_SIZE   STACK_WORDS(1024*12)
 #define MIC_TASK_PRIORITY     (configMAX_PRIORITIES - 3)
-#define LED_TASK_STACK_SIZE   512
+#define LED_TASK_STACK_SIZE   STACK_WORDS(512)
 #define LED_TASK_PRIORITY     (configMAX_PRIORITIES - 4)
 #define BOOT_HOLD_TICKS      30   /* 30 x 100ms = 3 seconds */
 #define BOOT_CLICK_WINDOW    5    /* 500ms window between clicks */
