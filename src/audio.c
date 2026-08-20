@@ -102,6 +102,7 @@ static int16_t  spk_resamp[OPUS_FRAME_SAMPLES * 2];
 static bool     mic_first_frame;
 static volatile bool encoding_in_progress;
 static volatile bool encoder_reset_pending;
+static int encoder_force_channels;
 
 /* Double-frame buffers for 0x39 report (2x haptics + 2x opus per packet) */
 static uint8_t  opus_slots[2][OPUS_OUT_SIZE];
@@ -342,6 +343,7 @@ int audio_init(void)
     opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
     opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(0));
     opus_encoder_ctl(encoder, OPUS_SET_FORCE_MODE_REQUEST, (opus_int32)MODE_CELT_ONLY);
+    encoder_force_channels = 1;
 
     decoder = (OpusDecoder *)decoder_mem;
     err = opus_decoder_init(decoder, 48000, MIC_CHANNELS);
@@ -415,6 +417,22 @@ void audio_task(void *arg)
                 bt_hid_host_get_state() == BT_HID_STATE_CONNECTED)
             {
                 bool speaker_on = !config_get()->disable_speaker;
+                int target_channels = plug_headset ? 2 : 1;
+
+                /* Opus supports changing the encoded channel count between
+                 * frames. Keep the CTL in the owning audio task so headset
+                 * reports cannot race an active opus_encode() call. */
+                if (target_channels != encoder_force_channels) {
+                    int ctl_err = opus_encoder_ctl(
+                        encoder, OPUS_SET_FORCE_CHANNELS(target_channels));
+                    if (ctl_err == OPUS_OK) {
+                        encoder_force_channels = target_channels;
+                    } else {
+                        LOG_ERR("[AUDIO] Opus force %s failed: %d\n",
+                                target_channels == 1 ? "mono" : "stereo",
+                                ctl_err);
+                    }
+                }
 
                 for (int slot = 0; slot < 2; slot++) {
                     if (slot == 1)
