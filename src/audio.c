@@ -32,6 +32,7 @@
 #define MIC_CHANNELS        1       /* Controller sends mono mic */
 #define MIC_QUEUE_DEPTH     4
 
+#if LOG_LEVEL >= 3
 /* Aggregate codec timings so UART logging does not perturb every frame. */
 #define OPUS_TIMING_WINDOW  1280U
 
@@ -54,7 +55,7 @@ static void opus_timing_record(opus_timing_stats_t *stats,
     stats->count++;
 
     if (stats->count >= OPUS_TIMING_WINDOW) {
-        LOG_INF("[OPUS] %s avg=%lu us min=%lu us max=%lu us n=%lu\n",
+        LOG_DBG("[OPUS] %s avg=%lu us min=%lu us max=%lu us n=%lu\n",
                 name,
                 (unsigned long)(stats->total_us / stats->count),
                 (unsigned long)stats->min_us,
@@ -63,6 +64,7 @@ static void opus_timing_record(opus_timing_stats_t *stats,
         memset(stats, 0, sizeof(*stats));
     }
 }
+#endif
 
 /* Polyphase sinc resampler: 512→480 = 16:15 ratio
  * Matches DS5Dongle's WDL sinc resampler for anti-alias filtering.
@@ -404,7 +406,9 @@ void audio_task(void *arg)
     (void)arg;
 
     SemaphoreHandle_t sem = (SemaphoreHandle_t)usb_audio_get_semaphore();
+#if LOG_LEVEL >= 3
     opus_timing_stats_t encode_timing = {0};
+#endif
     LOG_INF("[AUDIO] Task started\n");
 
     for (;;) {
@@ -444,14 +448,18 @@ void audio_task(void *arg)
                     if (speaker_on) {
                         resample_512_480(slot_pcm, spk_resamp);
                         encoding_in_progress = true;
+#if LOG_LEVEL >= 3
                         uint64_t encode_start_us = bflb_mtimer_get_time_us();
+#endif
                         int encoded = opus_encode(encoder, spk_resamp, OPUS_FRAME_SAMPLES,
                                                   opus_slots[slot], OPUS_OUT_SIZE);
+                        encoding_in_progress = false;
+#if LOG_LEVEL >= 3
                         uint32_t encode_elapsed_us = (uint32_t)
                             (bflb_mtimer_get_time_us() - encode_start_us);
-                        encoding_in_progress = false;
                         opus_timing_record(&encode_timing, "enc",
                                            encode_elapsed_us);
+#endif
 
                         if (encoder_reset_pending) {
                             encoder_reset_pending = false;
@@ -557,7 +565,9 @@ void audio_mic_task(void *arg)
     static uint8_t  mic_opus_buf[MIC_OPUS_SIZE];
     static int16_t  mic_mono[OPUS_FRAME_SAMPLES];
     static int16_t  mic_stereo[OPUS_FRAME_SAMPLES * 2];
+#if LOG_LEVEL >= 3
     opus_timing_stats_t decode_timing = {0};
+#endif
 
     for (;;) {
         if (!mic_queue) {
@@ -571,12 +581,16 @@ void audio_mic_task(void *arg)
         if (!decoder || !mic_enabled)
             continue;
 
+#if LOG_LEVEL >= 3
         uint64_t decode_start_us = bflb_mtimer_get_time_us();
+#endif
         int decoded = opus_decode(decoder, mic_opus_buf, MIC_OPUS_SIZE,
                                   mic_mono, OPUS_FRAME_SAMPLES, 0);
+#if LOG_LEVEL >= 3
         uint32_t decode_elapsed_us = (uint32_t)
             (bflb_mtimer_get_time_us() - decode_start_us);
         opus_timing_record(&decode_timing, "dec", decode_elapsed_us);
+#endif
         if (decoded <= 0) {
             LOG_ERR("[MIC] Opus decode error: %d\n", decoded);
             continue;

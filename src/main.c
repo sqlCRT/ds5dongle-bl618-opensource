@@ -30,9 +30,9 @@
 #define STACK_WORDS(bytes) \
     (((bytes) + sizeof(StackType_t) - 1) / sizeof(StackType_t))
 
-#define BT_TASK_STACK_SIZE    STACK_WORDS(1024*12)
+#define BT_TASK_STACK_SIZE    STACK_WORDS(1024*24)
 #define BT_TASK_PRIORITY      (configMAX_PRIORITIES - 2)
-#define USB_TASK_STACK_SIZE   STACK_WORDS(1024*6)
+#define USB_TASK_STACK_SIZE   STACK_WORDS(1024*12)
 #define USB_TASK_PRIORITY     (configMAX_PRIORITIES - 1)
 #define AUDIO_TASK_STACK_SIZE STACK_WORDS(1024*32)
 #define AUDIO_TASK_PRIORITY   (configMAX_PRIORITIES - 1)
