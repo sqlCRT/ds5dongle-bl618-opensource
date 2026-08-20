@@ -334,6 +334,12 @@ int audio_init(void)
     opus_encoder_ctl(encoder, OPUS_SET_BITRATE(200 * 8 * 100));
     opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
     opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(0));
+    err = opus_encoder_ctl(encoder, OPUS_SET_FORCE_CHANNELS(1));
+    if (err != OPUS_OK) {
+        LOG_ERR("[AUDIO] Opus force mono failed: %d\n", err);
+        encoder = NULL;
+        return -1;
+    }
     encoder_force_channels = 1;
 
     decoder = (OpusDecoder *)decoder_mem;
