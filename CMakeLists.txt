@@ -9,6 +9,9 @@ endif()
 
 find_package(bouffalo_sdk REQUIRED HINTS $ENV{BL_SDK_BASE})
 
+# Incoming Bluetooth HCI/L2CAP reports must preempt audio encoding.
+sdk_add_compile_definitions(-DCONFIG_BT_RX_PRIO=5)
+
 sdk_set_main_file(src/main.c)
 
 target_sources(app PRIVATE
