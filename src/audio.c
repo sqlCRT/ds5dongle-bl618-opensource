@@ -14,14 +14,6 @@
 #include "debug_log.h"
 #include <math.h>
 
-/* Opus internal CTL — force CELT-only to skip SILK mode decision per frame */
-#ifndef OPUS_SET_FORCE_MODE_REQUEST
-#define OPUS_SET_FORCE_MODE_REQUEST 11002
-#endif
-#ifndef MODE_CELT_ONLY
-#define MODE_CELT_ONLY 1002
-#endif
-
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -331,7 +323,7 @@ int audio_init(void)
 
     encoder = (OpusEncoder *)encoder_mem;
     err = opus_encoder_init(encoder, 48000, 2,
-                            OPUS_APPLICATION_RESTRICTED_LOWDELAY);
+                            OPUS_APPLICATION_RESTRICTED_CELT);
     if (err != OPUS_OK) {
         LOG_ERR("[AUDIO] Opus encoder init failed: %d\n", err);
         encoder = NULL;
@@ -342,7 +334,6 @@ int audio_init(void)
     opus_encoder_ctl(encoder, OPUS_SET_BITRATE(200 * 8 * 100));
     opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
     opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(0));
-    opus_encoder_ctl(encoder, OPUS_SET_FORCE_MODE_REQUEST, (opus_int32)MODE_CELT_ONLY);
     encoder_force_channels = 1;
 
     decoder = (OpusDecoder *)decoder_mem;
