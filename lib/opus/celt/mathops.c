@@ -286,7 +286,7 @@ opus_val32 celt_rcp_norm32(opus_val32 x)
 /** Reciprocal approximation (Q15 input, Q16 output) */
 opus_val32 celt_rcp(opus_val32 x)
 {
-#if defined(E907_OPUS_DSP)
+#if defined(E907_OPUS_DSP) && !defined(E907_DISABLE_DIVU)
    celt_sig_assert(x>0);
    if (x == 1) return 2147483647;
    opus_uint32 result;

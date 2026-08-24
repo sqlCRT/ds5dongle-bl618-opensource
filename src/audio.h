@@ -61,4 +61,10 @@ bool audio_mic_active(void);
  */
 void audio_mic_task(void *arg);
 
+/**
+ * Check if the audio task was killed by the encode watchdog and respawn it.
+ * Call periodically from bt_task or main loop. Returns true if respawned.
+ */
+bool audio_check_respawn(void);
+
 #endif /* AUDIO_H */
