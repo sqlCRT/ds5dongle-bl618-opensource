@@ -78,21 +78,56 @@ static OPUS_INLINE opus_val32 e907_mult16_32_q15(opus_val16 a, opus_val32 b)
 #endif
 
 /** 32x32 multiplication, followed by a 16-bit shift right. Results fits in 32 bits */
-#if OPUS_FAST_INT64
+#if defined(E907_OPUS_DSP)
+static OPUS_INLINE opus_val32 e907_mult32_32_q16(opus_val32 a, opus_val32 b)
+{
+    opus_int64 product;
+    /* E907 produces the complete 64-bit product in one instruction. WEXTI,
+       emitted for the shift below, then extracts bits 47:16. */
+    __asm__ volatile("mulsr64 %0, %1, %2"
+                     : "=r"(product)
+                     : "r"(a), "r"(b));
+    return (opus_val32)(product >> 16);
+}
+#define MULT32_32_Q16(a,b) e907_mult32_32_q16((opus_val32)(a),(opus_val32)(b))
+#elif OPUS_FAST_INT64
 #define MULT32_32_Q16(a,b) ((opus_val32)SHR((opus_int64)(a)*(opus_int64)(b),16))
 #else
 #define MULT32_32_Q16(a,b) (ADD32(ADD32(ADD32((opus_val32)(SHR32(((opus_uint32)((a)&0x0000ffff)*(opus_uint32)((b)&0x0000ffff)),16)), MULT16_16SU(SHR32(a,16),((b)&0x0000ffff))), MULT16_16SU(SHR32(b,16),((a)&0x0000ffff))), SHL32(MULT16_16(SHR32(a,16),SHR32(b,16)),16)))
 #endif
 
 /** 32x32 multiplication, followed by a 31-bit shift right. Results fits in 32 bits */
-#if OPUS_FAST_INT64
+#if defined(E907_OPUS_DSP)
+static OPUS_INLINE opus_val32 e907_mult32_32_q31(opus_val32 a, opus_val32 b)
+{
+    opus_val32 result;
+    /* K.WMMUL is the E907's native signed Q31 multiply. Opus never passes
+       the sole saturating corner case (-1.0 * -1.0) to this primitive. */
+    __asm__ volatile("kwmmul %0, %1, %2"
+                     : "=r"(result)
+                     : "r"(a), "r"(b));
+    return result;
+}
+#define MULT32_32_Q31(a,b) e907_mult32_32_q31((opus_val32)(a),(opus_val32)(b))
+#elif OPUS_FAST_INT64
 #define MULT32_32_Q31(a,b) ((opus_val32)SHR((opus_int64)(a)*(opus_int64)(b),31))
 #else
 #define MULT32_32_Q31(a,b) ADD32(ADD32(SHL(MULT16_16(SHR((a),16),SHR((b),16)),1), SHR(MULT16_16SU(SHR((a),16),((b)&0x0000ffff)),15)), SHR(MULT16_16SU(SHR((b),16),((a)&0x0000ffff)),15))
 #endif
 
 /** 32x32 multiplication, followed by a 31-bit shift right (with rounding). Results fits in 32 bits */
-#if OPUS_FAST_INT64
+#if defined(E907_OPUS_DSP)
+static OPUS_INLINE opus_val32 e907_mult32_32_p31(opus_val32 a, opus_val32 b)
+{
+    opus_val32 result;
+    __asm__ volatile("kwmmul.u %0, %1, %2"
+                     : "=r"(result)
+                     : "r"(a), "r"(b));
+    return result;
+}
+#define MULT32_32_P31(a,b) e907_mult32_32_p31((opus_val32)(a),(opus_val32)(b))
+#define MULT32_32_P31_ovflw(a,b) MULT32_32_P31((a),(b))
+#elif OPUS_FAST_INT64
 #define MULT32_32_P31(a,b) ((opus_val32)SHR(1073741824+(opus_int64)(a)*(opus_int64)(b),31))
 #define MULT32_32_P31_ovflw(a,b) MULT32_32_P31(a,b)
 #else
@@ -102,7 +137,17 @@ static OPUS_INLINE opus_val32 e907_mult16_32_q15(opus_val16 a, opus_val32 b)
 #endif
 
 /** 32x32 multiplication, followed by a 32-bit shift right. Results fits in 32 bits */
-#if OPUS_FAST_INT64
+#if defined(E907_OPUS_DSP)
+static OPUS_INLINE opus_val32 e907_mult32_32_q32(opus_val32 a, opus_val32 b)
+{
+    opus_val32 result;
+    __asm__ volatile("mulh %0, %1, %2"
+                     : "=r"(result)
+                     : "r"(a), "r"(b));
+    return result;
+}
+#define MULT32_32_Q32(a,b) e907_mult32_32_q32((opus_val32)(a),(opus_val32)(b))
+#elif OPUS_FAST_INT64
 #define MULT32_32_Q32(a,b) ((opus_val32)SHR((opus_int64)(a)*(opus_int64)(b),32))
 #else
 #define MULT32_32_Q32(a,b) ADD32(ADD32(MULT16_16(SHR((a),16),SHR((b),16)), SHR(MULT16_16SU(SHR((a),16),((b)&0x0000ffff)),16)), SHR(MULT16_16SU(SHR((b),16),((a)&0x0000ffff)),16))

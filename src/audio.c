@@ -7,19 +7,12 @@
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "queue.h"
+#include "bflb_mtimer.h"
 
 #include "opus.h"
 #include <string.h>
 #include "debug_log.h"
 #include <math.h>
-
-/* Opus internal CTL — force CELT-only to skip SILK mode decision per frame */
-#ifndef OPUS_SET_FORCE_MODE_REQUEST
-#define OPUS_SET_FORCE_MODE_REQUEST 11002
-#endif
-#ifndef MODE_CELT_ONLY
-#define MODE_CELT_ONLY 1002
-#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -38,6 +31,40 @@
 #define MIC_OPUS_SIZE       71      /* Opus encoded mic frame from DualSense */
 #define MIC_CHANNELS        1       /* Controller sends mono mic */
 #define MIC_QUEUE_DEPTH     4
+
+#if LOG_LEVEL >= 3
+/* Aggregate codec timings so UART logging does not perturb every frame. */
+#define OPUS_TIMING_WINDOW  1280U
+
+typedef struct {
+    uint32_t count;
+    uint32_t total_us;
+    uint32_t min_us;
+    uint32_t max_us;
+} opus_timing_stats_t;
+
+static void opus_timing_record(opus_timing_stats_t *stats,
+                               const char *name, uint32_t elapsed_us)
+{
+    if (stats->count == 0 || elapsed_us < stats->min_us)
+        stats->min_us = elapsed_us;
+    if (elapsed_us > stats->max_us)
+        stats->max_us = elapsed_us;
+
+    stats->total_us += elapsed_us;
+    stats->count++;
+
+    if (stats->count >= OPUS_TIMING_WINDOW) {
+        LOG_DBG("[OPUS] %s avg=%lu us min=%lu us max=%lu us n=%lu\n",
+                name,
+                (unsigned long)(stats->total_us / stats->count),
+                (unsigned long)stats->min_us,
+                (unsigned long)stats->max_us,
+                (unsigned long)stats->count);
+        memset(stats, 0, sizeof(*stats));
+    }
+}
+#endif
 
 /* Polyphase sinc resampler: 512→480 = 16:15 ratio
  * Matches DS5Dongle's WDL sinc resampler for anti-alias filtering.
@@ -69,6 +96,7 @@ static int16_t  spk_resamp[OPUS_FRAME_SAMPLES * 2];
 static bool     mic_first_frame;
 static volatile bool encoding_in_progress;
 static volatile bool encoder_reset_pending;
+static int encoder_force_channels;
 
 /* Double-frame buffers for 0x39 report (2x haptics + 2x opus per packet) */
 static uint8_t  opus_slots[2][OPUS_OUT_SIZE];
@@ -134,7 +162,7 @@ static void resamp_sinc_init(void)
     }
 }
 
-/* ---- Polyphase sinc resample 512 -> 480 (stereo int16, q15 fixed-point) ---- */
+/* ---- Polyphase sinc resample 512 -> 480 (4ch USB PCM -> stereo, q15) ---- */
 static void resample_512_480(const int16_t *in, int16_t *out)
 {
     for (int i = 0; i < OPUS_FRAME_SAMPLES; i++) {
@@ -146,14 +174,38 @@ static void resample_512_480(const int16_t *in, int16_t *out)
         int32_t sum_l = (1 << 14);  /* +0.5 LSB rounding bias before >>15 */
         int32_t sum_r = (1 << 14);
 
-        for (int t = 0; t < SINC_TAPS; t++) {
-            int idx = center + t - (SINC_HALF_TAPS - 1);
-            if (idx < 0) idx = 0;
-            if (idx >= HALF_ACCUM) idx = HALF_ACCUM - 1;
+        /* All but six outputs are away from an input edge. Keeping that hot
+           path branch-free avoids 16 clamps and the inner-loop branch for
+           every sample. Input is the original 4-channel USB buffer, so this
+           also removes the temporary stereo de-interleave pass. */
+        if (center >= SINC_HALF_TAPS - 1 &&
+            center <= HALF_ACCUM - SINC_HALF_TAPS - 1) {
+            const int16_t *s = in +
+                (center - (SINC_HALF_TAPS - 1)) * USB_AUDIO_CHANNELS;
+#define RESAMP_TAP(t) do { \
+                int16_t coeff = c[(t)]; \
+                sum_l += (int32_t)s[(t) * USB_AUDIO_CHANNELS] * coeff; \
+                sum_r += (int32_t)s[(t) * USB_AUDIO_CHANNELS + 1] * coeff; \
+            } while (0)
+            RESAMP_TAP(0);
+            RESAMP_TAP(1);
+            RESAMP_TAP(2);
+            RESAMP_TAP(3);
+            RESAMP_TAP(4);
+            RESAMP_TAP(5);
+            RESAMP_TAP(6);
+            RESAMP_TAP(7);
+#undef RESAMP_TAP
+        } else {
+            for (int t = 0; t < SINC_TAPS; t++) {
+                int idx = center + t - (SINC_HALF_TAPS - 1);
+                if (idx < 0) idx = 0;
+                if (idx >= HALF_ACCUM) idx = HALF_ACCUM - 1;
 
-            int16_t coeff = c[t];
-            sum_l += (int32_t)in[idx * 2]     * coeff;
-            sum_r += (int32_t)in[idx * 2 + 1] * coeff;
+                int16_t coeff = c[t];
+                sum_l += (int32_t)in[idx * USB_AUDIO_CHANNELS] * coeff;
+                sum_r += (int32_t)in[idx * USB_AUDIO_CHANNELS + 1] * coeff;
+            }
         }
 
         int32_t l = sum_l >> 15;
@@ -188,9 +240,9 @@ static void decimate_haptics(const int16_t *in, int8_t *out, uint32_t in_samples
     }
 
     for (uint32_t i = 0; i < out_pairs; i++) {
-        uint32_t idx = (i * HAPTIC_DECIMATE) * 2;
-        int32_t val_l = in[idx];
-        int32_t val_r = in[idx + 1];
+        uint32_t idx = (i * HAPTIC_DECIMATE) * USB_AUDIO_CHANNELS;
+        int32_t val_l = in[idx + 2];
+        int32_t val_r = in[idx + 3];
         val_l = (val_l * gain_fp) >> 16;
         val_r = (val_r * gain_fp) >> 16;
         if (val_l > 127) val_l = 127;
@@ -273,7 +325,7 @@ int audio_init(void)
 
     encoder = (OpusEncoder *)encoder_mem;
     err = opus_encoder_init(encoder, 48000, 2,
-                            OPUS_APPLICATION_RESTRICTED_LOWDELAY);
+                            OPUS_APPLICATION_RESTRICTED_CELT);
     if (err != OPUS_OK) {
         LOG_ERR("[AUDIO] Opus encoder init failed: %d\n", err);
         encoder = NULL;
@@ -284,7 +336,13 @@ int audio_init(void)
     opus_encoder_ctl(encoder, OPUS_SET_BITRATE(200 * 8 * 100));
     opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
     opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(0));
-    opus_encoder_ctl(encoder, OPUS_SET_FORCE_MODE_REQUEST, (opus_int32)MODE_CELT_ONLY);
+    err = opus_encoder_ctl(encoder, OPUS_SET_FORCE_CHANNELS(1));
+    if (err != OPUS_OK) {
+        LOG_ERR("[AUDIO] Opus force mono failed: %d\n", err);
+        encoder = NULL;
+        return -1;
+    }
+    encoder_force_channels = 1;
 
     decoder = (OpusDecoder *)decoder_mem;
     err = opus_decoder_init(decoder, 48000, MIC_CHANNELS);
@@ -348,6 +406,9 @@ void audio_task(void *arg)
     (void)arg;
 
     SemaphoreHandle_t sem = (SemaphoreHandle_t)usb_audio_get_semaphore();
+#if LOG_LEVEL >= 3
+    opus_timing_stats_t encode_timing = {0};
+#endif
     LOG_INF("[AUDIO] Task started\n");
 
     for (;;) {
@@ -356,33 +417,49 @@ void audio_task(void *arg)
                 usb_audio_read(pcm_block) &&
                 bt_hid_host_get_state() == BT_HID_STATE_CONNECTED)
             {
-                static int16_t spk_raw[HALF_ACCUM * 2];
-                static int16_t hap_raw[HALF_ACCUM * 2];
-
                 bool speaker_on = !config_get()->disable_speaker;
+                int target_channels = plug_headset ? 2 : 1;
+
+                /* Opus supports changing the encoded channel count between
+                 * frames. Keep the CTL in the owning audio task so headset
+                 * reports cannot race an active opus_encode() call. */
+                if (target_channels != encoder_force_channels) {
+                    int ctl_err = opus_encoder_ctl(
+                        encoder, OPUS_SET_FORCE_CHANNELS(target_channels));
+                    if (ctl_err == OPUS_OK) {
+                        encoder_force_channels = target_channels;
+                    } else {
+                        LOG_ERR("[AUDIO] Opus force %s failed: %d\n",
+                                target_channels == 1 ? "mono" : "stereo",
+                                ctl_err);
+                    }
+                }
 
                 for (int slot = 0; slot < 2; slot++) {
                     if (slot == 1)
                         taskYIELD();
 
                     const uint32_t base = (uint32_t)slot * HALF_ACCUM;
+                    const int16_t *slot_pcm =
+                        &pcm_block[base * USB_AUDIO_CHANNELS];
 
-                    for (uint32_t i = 0; i < HALF_ACCUM; i++) {
-                        uint32_t src = base + i;
-                        spk_raw[i * 2]     = pcm_block[src * USB_AUDIO_CHANNELS];
-                        spk_raw[i * 2 + 1] = pcm_block[src * USB_AUDIO_CHANNELS + 1];
-                        hap_raw[i * 2]     = pcm_block[src * USB_AUDIO_CHANNELS + 2];
-                        hap_raw[i * 2 + 1] = pcm_block[src * USB_AUDIO_CHANNELS + 3];
-                    }
-
-                    decimate_haptics(hap_raw, haptic_slots[slot], HALF_ACCUM);
+                    decimate_haptics(slot_pcm, haptic_slots[slot], HALF_ACCUM);
 
                     if (speaker_on) {
-                        resample_512_480(spk_raw, spk_resamp);
+                        resample_512_480(slot_pcm, spk_resamp);
                         encoding_in_progress = true;
+#if LOG_LEVEL >= 3
+                        uint64_t encode_start_us = bflb_mtimer_get_time_us();
+#endif
                         int encoded = opus_encode(encoder, spk_resamp, OPUS_FRAME_SAMPLES,
                                                   opus_slots[slot], OPUS_OUT_SIZE);
                         encoding_in_progress = false;
+#if LOG_LEVEL >= 3
+                        uint32_t encode_elapsed_us = (uint32_t)
+                            (bflb_mtimer_get_time_us() - encode_start_us);
+                        opus_timing_record(&encode_timing, "enc",
+                                           encode_elapsed_us);
+#endif
 
                         if (encoder_reset_pending) {
                             encoder_reset_pending = false;
@@ -488,6 +565,9 @@ void audio_mic_task(void *arg)
     static uint8_t  mic_opus_buf[MIC_OPUS_SIZE];
     static int16_t  mic_mono[OPUS_FRAME_SAMPLES];
     static int16_t  mic_stereo[OPUS_FRAME_SAMPLES * 2];
+#if LOG_LEVEL >= 3
+    opus_timing_stats_t decode_timing = {0};
+#endif
 
     for (;;) {
         if (!mic_queue) {
@@ -501,8 +581,16 @@ void audio_mic_task(void *arg)
         if (!decoder || !mic_enabled)
             continue;
 
+#if LOG_LEVEL >= 3
+        uint64_t decode_start_us = bflb_mtimer_get_time_us();
+#endif
         int decoded = opus_decode(decoder, mic_opus_buf, MIC_OPUS_SIZE,
                                   mic_mono, OPUS_FRAME_SAMPLES, 0);
+#if LOG_LEVEL >= 3
+        uint32_t decode_elapsed_us = (uint32_t)
+            (bflb_mtimer_get_time_us() - decode_start_us);
+        opus_timing_record(&decode_timing, "dec", decode_elapsed_us);
+#endif
         if (decoded <= 0) {
             LOG_ERR("[MIC] Opus decode error: %d\n", decoded);
             continue;
