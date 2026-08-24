@@ -32,6 +32,10 @@ struct __attribute__((packed)) config_body {
     uint8_t led_r;                /* [0-255] custom LED red   (0xFF = default white) */
     uint8_t led_g;                /* [0-255] custom LED green (0xFF = default white) */
     uint8_t led_b;                /* [0-255] custom LED blue  (0xFF = default white) */
+    uint8_t tp_mode;              /* 0=off, 1=dpad, 2=Lmouse+Rdpad, 3=Ldpad+Rmouse, 4=split */
+    uint8_t tp_mode_enabled_mask; /* bitmask of enabled modes (bit0-bit4) */
+    uint8_t tp_mouse_sensitivity; /* [1-32], default 8 */
+    uint8_t audio_haptic;         /* 0=off, 1=auto(game priority), 2=force */
 };
 
 #define CONFIG_VERSION  2

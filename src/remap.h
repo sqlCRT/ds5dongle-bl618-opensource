@@ -8,7 +8,7 @@
 /* KBD: emit HID keyboard keycode (+ optional modifier or 2nd key)    */
 /* ------------------------------------------------------------------ */
 
-#define REMAP_BTN_COUNT  15
+#define REMAP_BTN_COUNT  31
 
 /* Source button IDs (index into g_remap[]) */
 #define REMAP_BTN_SQUARE    0
@@ -26,10 +26,32 @@
 #define REMAP_BTN_PS        12
 #define REMAP_BTN_TP_CLICK  13
 #define REMAP_BTN_MUTE      14
+#define REMAP_BTN_DPAD_UP   15
+#define REMAP_BTN_DPAD_DOWN 16
+#define REMAP_BTN_DPAD_LEFT 17
+#define REMAP_BTN_DPAD_RIGHT 18
+/* Touchpad left-half zone (X < 960) */
+#define REMAP_BTN_TP_L_TOUCH 19
+#define REMAP_BTN_TP_L_UP    20
+#define REMAP_BTN_TP_L_DOWN  21
+#define REMAP_BTN_TP_L_LEFT  22
+#define REMAP_BTN_TP_L_RIGHT 23
+#define REMAP_BTN_TP_L_CLICK 24
+/* Touchpad right-half zone (X >= 960) */
+#define REMAP_BTN_TP_R_TOUCH 25
+#define REMAP_BTN_TP_R_UP    26
+#define REMAP_BTN_TP_R_DOWN  27
+#define REMAP_BTN_TP_R_LEFT  28
+#define REMAP_BTN_TP_R_RIGHT 29
+#define REMAP_BTN_TP_R_CLICK 30
+
+#define REMAP_LEGACY_BTN_COUNT 15
+#define REMAP_OLD_BTN_COUNT    23  /* pre-split-zone table size */
 
 /* Target types */
-#define REMAP_TYPE_BTN 0   /* value = target button ID 0-14 */
-#define REMAP_TYPE_KBD 1   /* value = USB HID keycode       */
+#define REMAP_TYPE_BTN   0   /* value = target button ID 0-30 */
+#define REMAP_TYPE_KBD   1   /* value = USB HID keycode       */
+#define REMAP_TYPE_MOUSE 2   /* value = mouse button: 0=left, 1=right, 2=middle */
 
 /* flags bit 0 */
 #define REMAP_FLAG_SUPPRESS  0x01  /* suppress original gamepad bit output */
@@ -58,7 +80,10 @@ void remap_apply(uint8_t *payload);
 void remap_kbd_tick(const uint8_t *payload);
 void remap_on_disconnect(void);
 bool remap_has_kbd_targets(void);
+bool remap_has_mouse_targets(void);
+void remap_mouse_tick(const uint8_t *payload);
 const remap_entry_t *remap_get_table(void);
 const remap_entry_t *remap_get_profile_table(uint8_t profile);
 uint8_t remap_get_active_profile(void);
 void remap_switch_profile(uint8_t profile);
+void remap_tp_cycle_mode(void);

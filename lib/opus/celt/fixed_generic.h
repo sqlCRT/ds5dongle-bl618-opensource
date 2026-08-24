@@ -82,8 +82,6 @@ static OPUS_INLINE opus_val32 e907_mult16_32_q15(opus_val16 a, opus_val32 b)
 static OPUS_INLINE opus_val32 e907_mult32_32_q16(opus_val32 a, opus_val32 b)
 {
     opus_int64 product;
-    /* E907 produces the complete 64-bit product in one instruction. WEXTI,
-       emitted for the shift below, then extracts bits 47:16. */
     __asm__ volatile("mulsr64 %0, %1, %2"
                      : "=r"(product)
                      : "r"(a), "r"(b));
@@ -101,8 +99,6 @@ static OPUS_INLINE opus_val32 e907_mult32_32_q16(opus_val32 a, opus_val32 b)
 static OPUS_INLINE opus_val32 e907_mult32_32_q31(opus_val32 a, opus_val32 b)
 {
     opus_val32 result;
-    /* K.WMMUL is the E907's native signed Q31 multiply. Opus never passes
-       the sole saturating corner case (-1.0 * -1.0) to this primitive. */
     __asm__ volatile("kwmmul %0, %1, %2"
                      : "=r"(result)
                      : "r"(a), "r"(b));

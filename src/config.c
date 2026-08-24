@@ -66,6 +66,14 @@ void config_validate(void)
         b->led_g = 0xFF;
         b->led_b = 0xFF;
     }
+    if (b->tp_mode > 4)
+        b->tp_mode = 0;
+    if (b->tp_mode_enabled_mask == 0 || b->tp_mode_enabled_mask > 0x1F)
+        b->tp_mode_enabled_mask = 0x01; /* at least mode 0 enabled */
+    if (b->tp_mouse_sensitivity == 0 || b->tp_mouse_sensitivity > 32)
+        b->tp_mouse_sensitivity = 8;
+    if (b->audio_haptic > 2)
+        b->audio_haptic = 0;
 }
 
 void config_load(void)
@@ -93,11 +101,22 @@ void config_load(void)
         cfg.led_r             = 0xFF;
         cfg.led_g             = 0xFF;
         cfg.led_b             = 0xFF;
+        cfg.tp_mode           = 0;     /* off */
+        cfg.tp_mode_enabled_mask = 0x03; /* mode 0 + mode 1 enabled */
+        cfg.tp_mouse_sensitivity = 8;
+    }
+    /* Migrate old 27-byte config: byte 26 was tp_mouse_sensitivity, not mask */
+    if (err == 0 && rlen == 27) {
+        cfg.tp_mouse_sensitivity = cfg.tp_mode_enabled_mask;
+        cfg.tp_mode_enabled_mask = 0x03;
     }
     config_validate();
     LOG_INF("[CFG] Loaded: wake=%d led_off=%d inactive=%dmin poll=%d ps=%d\n",
            cfg.enable_wake, cfg.disable_led, cfg.inactive_time,
            cfg.polling_rate_mode, cfg.ps_shortcut_enabled);
+    LOG_INF("[CFG] tp_mode=%u mask=0x%02x sens=%u (rlen=%u)\n",
+           cfg.tp_mode, cfg.tp_mode_enabled_mask, cfg.tp_mouse_sensitivity,
+           (unsigned)rlen);
 }
 
 bool config_save(void)

@@ -225,8 +225,9 @@ static void audio_ep_out_handler(uint8_t busid, uint8_t ep, uint32_t nbytes)
     (void)ep;
 
     if (nbytes == 0 || !stream_active) {
-        if (stream_active)
+        if (stream_active) {
             usbd_ep_start_read(busid, USB_AUDIO_EP_OUT, iso_rx_buf, sizeof(iso_rx_buf));
+        }
         return;
     }
 
@@ -307,7 +308,9 @@ void usbd_audio_open(uint8_t busid, uint8_t intf)
         pcm_write_idx = 0;
         pcm_ready = false;
         state_mgr_set_spk_active(true);
-        usbd_ep_start_read(busid, USB_AUDIO_EP_OUT, iso_rx_buf, sizeof(iso_rx_buf));
+        int r = usbd_ep_start_read(busid, USB_AUDIO_EP_OUT, iso_rx_buf, sizeof(iso_rx_buf));
+        if (r < 0)
+            LOG_ERR("[AUDIO] initial ep_start_read fail=%d\n", r);
     } else if (intf == USB_AUDIO_INTF_MIC) {
         LOG_INF("[AUDIO] Mic stream opened\n");
         mic_active = true;
@@ -418,6 +421,8 @@ bool usb_audio_is_active(void)
 
 void usb_audio_stop(void)
 {
+    if (stream_active)
+        LOG_INF("[AUDIO] usb_audio_stop\n");
     stream_active = false;
     pcm_write_pos = 0;
     pcm_write_idx = 0;
@@ -461,7 +466,6 @@ bool usb_audio_mic_is_active(void)
 {
     return mic_active;
 }
-
 
 void usb_audio_mic_stop(void)
 {

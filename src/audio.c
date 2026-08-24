@@ -7,12 +7,14 @@
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "queue.h"
+#include "timers.h"
 #include "bflb_mtimer.h"
 
 #include "opus.h"
 #include <string.h>
 #include "debug_log.h"
 #include <math.h>
+
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -31,40 +33,6 @@
 #define MIC_OPUS_SIZE       71      /* Opus encoded mic frame from DualSense */
 #define MIC_CHANNELS        1       /* Controller sends mono mic */
 #define MIC_QUEUE_DEPTH     4
-
-#if LOG_LEVEL >= 3
-/* Aggregate codec timings so UART logging does not perturb every frame. */
-#define OPUS_TIMING_WINDOW  1280U
-
-typedef struct {
-    uint32_t count;
-    uint32_t total_us;
-    uint32_t min_us;
-    uint32_t max_us;
-} opus_timing_stats_t;
-
-static void opus_timing_record(opus_timing_stats_t *stats,
-                               const char *name, uint32_t elapsed_us)
-{
-    if (stats->count == 0 || elapsed_us < stats->min_us)
-        stats->min_us = elapsed_us;
-    if (elapsed_us > stats->max_us)
-        stats->max_us = elapsed_us;
-
-    stats->total_us += elapsed_us;
-    stats->count++;
-
-    if (stats->count >= OPUS_TIMING_WINDOW) {
-        LOG_DBG("[OPUS] %s avg=%lu us min=%lu us max=%lu us n=%lu\n",
-                name,
-                (unsigned long)(stats->total_us / stats->count),
-                (unsigned long)stats->min_us,
-                (unsigned long)stats->max_us,
-                (unsigned long)stats->count);
-        memset(stats, 0, sizeof(*stats));
-    }
-}
-#endif
 
 /* Polyphase sinc resampler: 512→480 = 16:15 ratio
  * Matches DS5Dongle's WDL sinc resampler for anti-alias filtering.
@@ -87,6 +55,7 @@ static uint8_t  packet_counter;
 static volatile bool plug_headset;
 static volatile bool mic_enabled;   /* host opened mic interface AND config allows */
 static volatile bool mic_status_pending;  /* deferred: send 0x32 to controller */
+static int encoder_force_channels;
 
 static QueueHandle_t mic_queue;
 
@@ -96,7 +65,10 @@ static int16_t  spk_resamp[OPUS_FRAME_SAMPLES * 2];
 static bool     mic_first_frame;
 static volatile bool encoding_in_progress;
 static volatile bool encoder_reset_pending;
-static int encoder_force_channels;
+static volatile bool audio_task_killed;
+static volatile uint64_t encode_start_us;
+static TaskHandle_t audio_task_handle;
+static TimerHandle_t encode_watchdog;
 
 /* Double-frame buffers for 0x39 report (2x haptics + 2x opus per packet) */
 static uint8_t  opus_slots[2][OPUS_OUT_SIZE];
@@ -171,13 +143,9 @@ static void resample_512_480(const int16_t *in, int16_t *out)
         int phase  = (int)(src_pos % RESAMP_PHASES);
 
         const int16_t *c = sinc_q15[phase];
-        int32_t sum_l = (1 << 14);  /* +0.5 LSB rounding bias before >>15 */
+        int32_t sum_l = (1 << 14);
         int32_t sum_r = (1 << 14);
 
-        /* All but six outputs are away from an input edge. Keeping that hot
-           path branch-free avoids 16 clamps and the inner-loop branch for
-           every sample. Input is the original 4-channel USB buffer, so this
-           also removes the temporary stereo de-interleave pass. */
         if (center >= SINC_HALF_TAPS - 1 &&
             center <= HALF_ACCUM - SINC_HALF_TAPS - 1) {
             const int16_t *s = in +
@@ -254,8 +222,58 @@ static void decimate_haptics(const int16_t *in, int8_t *out, uint32_t in_samples
     }
 }
 
+/* ---- Audio-to-Haptic: decimate audio ch0/ch1 waveform to haptic format ----
+ * Same 16:1 point-sample as decimate_haptics, but reads ch0/ch1 instead of
+ * ch2/ch3.  DualSense LRA needs an oscillating waveform, not DC envelope. */
+static void audio_to_haptic(const int16_t *in, int8_t *out, uint32_t in_samples)
+{
+    uint32_t out_pairs = in_samples / HAPTIC_DECIMATE;
+    if (out_pairs > HAPTIC_BUF_SIZE / 2)
+        out_pairs = HAPTIC_BUF_SIZE / 2;
+
+    float gain_f = config_get()->haptics_gain;
+    if (gain_f < 1.0f) gain_f = 1.0f;
+    if (gain_f > 2.0f) gain_f = 2.0f;
+    int32_t gain_fp = (int32_t)(gain_f * 256.0f);
+
+    for (uint32_t i = 0; i < out_pairs; i++) {
+        uint32_t idx = (i * HAPTIC_DECIMATE) * USB_AUDIO_CHANNELS;
+        int32_t val_l = in[idx];       /* ch0 */
+        int32_t val_r = in[idx + 1];   /* ch1 */
+        val_l = (val_l * gain_fp) >> 16;
+        val_r = (val_r * gain_fp) >> 16;
+        if (val_l > 127) val_l = 127;
+        if (val_l < -128) val_l = -128;
+        if (val_r > 127) val_r = 127;
+        if (val_r < -128) val_r = -128;
+        out[i * 2]     = (int8_t)val_l;
+        out[i * 2 + 1] = (int8_t)val_r;
+    }
+}
+
+/* Detect whether ch2/ch3 carry real HD rumble or just noise/dither.
+ * Threshold avoids false positives from OS-injected low-level dither. */
+#define HAPTIC_SILENCE_THRESH  256
+
+static bool haptic_channel_silent(const int16_t *in, uint32_t in_samples)
+{
+    int32_t peak = 0;
+    for (uint32_t i = 0; i < in_samples; i += HAPTIC_DECIMATE) {
+        uint32_t idx = i * USB_AUDIO_CHANNELS;
+        int32_t v2 = in[idx + 2];
+        int32_t v3 = in[idx + 3];
+        if (v2 < 0) v2 = -v2;
+        if (v3 < 0) v3 = -v3;
+        if (v2 > peak) peak = v2;
+        if (v3 > peak) peak = v3;
+    }
+    return peak < HAPTIC_SILENCE_THRESH;
+}
+
 /* ---- Build and send BT report 0x39 (547 bytes, double-frame) ---- */
-static void send_audio_report(void)
+#define AUDIO_SEND_FAIL_MAX  50   /* ~1s @ 21ms/frame → force disconnect */
+
+static int send_audio_report(void)
 {
     static uint8_t pkt[DS5_BT_AUDIO_REPORT_SIZE];
     memset(pkt, 0, sizeof(pkt));
@@ -297,12 +315,61 @@ static void send_audio_report(void)
                              DS5_BT_AUDIO_REPORT_SIZE - 4);
     ds5_write_le32(&pkt[DS5_BT_AUDIO_REPORT_SIZE - 4], crc);
 
+    static uint32_t fail_log_count = 0;
     int ret = bt_hid_host_send_output(pkt, DS5_BT_AUDIO_REPORT_SIZE);
-    if (ret)
-        LOG_ERR("[AUDIO] BT send failed: %d\n", ret);
+    if (ret) {
+        fail_log_count++;
+        if (fail_log_count <= 3 || (fail_log_count % 100) == 0)
+            LOG_ERR("[AUDIO] BT send failed: %d (x%lu)\n",
+                    ret, (unsigned long)fail_log_count);
+    } else {
+        fail_log_count = 0;
+    }
+    return ret;
 }
 
 /* ---- Public API ---- */
+
+#define STACK_WORDS(bytes) \
+    (((bytes) + sizeof(StackType_t) - 1) / sizeof(StackType_t))
+#define AUDIO_TASK_STACK_SIZE STACK_WORDS(1024*32)
+#define AUDIO_TASK_PRIORITY   (configMAX_PRIORITIES - 2)
+
+#define ENCODE_TIMEOUT_US  15000  /* 15ms — normal encode takes ~5-7ms */
+#define WATCHDOG_PERIOD_MS 20
+
+static void encode_watchdog_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    if (!encoding_in_progress) return;
+
+    uint64_t elapsed = bflb_mtimer_get_time_us() - encode_start_us;
+    if (elapsed < ENCODE_TIMEOUT_US) return;
+
+    if (audio_task_handle) {
+        vTaskSuspend(audio_task_handle);
+    }
+
+    encoding_in_progress = false;
+    encoder_reset_pending = true;
+    audio_task_killed = true;
+}
+
+bool audio_check_respawn(void)
+{
+    if (!audio_task_killed) return false;
+    audio_task_killed = false;
+
+    if (audio_task_handle) {
+        vTaskDelete(audio_task_handle);
+        audio_task_handle = NULL;
+    }
+
+    xTaskCreate(audio_task, "audio", AUDIO_TASK_STACK_SIZE,
+                NULL, AUDIO_TASK_PRIORITY, NULL);
+    LOG_ERR("[WD-OPUS] respawned\n");
+    return true;
+}
 
 int audio_init(void)
 {
@@ -336,12 +403,7 @@ int audio_init(void)
     opus_encoder_ctl(encoder, OPUS_SET_BITRATE(200 * 8 * 100));
     opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
     opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(0));
-    err = opus_encoder_ctl(encoder, OPUS_SET_FORCE_CHANNELS(1));
-    if (err != OPUS_OK) {
-        LOG_ERR("[AUDIO] Opus force mono failed: %d\n", err);
-        encoder = NULL;
-        return -1;
-    }
+    opus_encoder_ctl(encoder, OPUS_SET_FORCE_CHANNELS(1));
     encoder_force_channels = 1;
 
     decoder = (OpusDecoder *)decoder_mem;
@@ -369,9 +431,14 @@ int audio_init(void)
     memset(opus_slots, 0, sizeof(opus_slots));
     memset(haptic_slots, 0, sizeof(haptic_slots));
 
-    LOG_INF("[AUDIO] Opus static init (enc=%d/%d dec=%d/%d mic_q=%p)\n",
+    encode_watchdog = xTimerCreate("wd-opus", pdMS_TO_TICKS(WATCHDOG_PERIOD_MS),
+                                   pdTRUE, NULL, encode_watchdog_cb);
+    if (encode_watchdog)
+        xTimerStart(encode_watchdog, 0);
+
+    LOG_INF("[AUDIO] Opus static init (enc=%d/%d dec=%d/%d mic_q=%p wd=%p)\n",
            enc_size, OPUS_ENC_MAX_SIZE, dec_size, OPUS_DEC_MAX_SIZE,
-           (void *)mic_queue);
+           (void *)mic_queue, (void *)encode_watchdog);
     return 0;
 }
 
@@ -405,24 +472,30 @@ void audio_task(void *arg)
 {
     (void)arg;
 
+    audio_task_handle = xTaskGetCurrentTaskHandle();
+
+    if (encoder_reset_pending) {
+        encoder_reset_pending = false;
+        opus_encoder_ctl(encoder, OPUS_RESET_STATE);
+        LOG_ERR("[WD-OPUS] encoder reset\n");
+    }
+
     SemaphoreHandle_t sem = (SemaphoreHandle_t)usb_audio_get_semaphore();
-#if LOG_LEVEL >= 3
-    opus_timing_stats_t encode_timing = {0};
-#endif
     LOG_INF("[AUDIO] Task started\n");
+
+    uint32_t send_fail_streak = 0;
 
     for (;;) {
         if (xSemaphoreTake(sem, pdMS_TO_TICKS(25)) == pdTRUE) {
-            if (usb_audio_is_active() &&
-                usb_audio_read(pcm_block) &&
-                bt_hid_host_get_state() == BT_HID_STATE_CONNECTED)
+            bool a_active = usb_audio_is_active();
+            bool a_read   = a_active ? usb_audio_read(pcm_block) : false;
+            bool a_bt     = bt_hid_host_get_state() == BT_HID_STATE_CONNECTED;
+
+            if (a_active && a_read && a_bt)
             {
                 bool speaker_on = !config_get()->disable_speaker;
                 int target_channels = plug_headset ? 2 : 1;
 
-                /* Opus supports changing the encoded channel count between
-                 * frames. Keep the CTL in the owning audio task so headset
-                 * reports cannot race an active opus_encode() call. */
                 if (target_channels != encoder_force_channels) {
                     int ctl_err = opus_encoder_ctl(
                         encoder, OPUS_SET_FORCE_CHANNELS(target_channels));
@@ -435,31 +508,29 @@ void audio_task(void *arg)
                     }
                 }
 
-                for (int slot = 0; slot < 2; slot++) {
-                    if (slot == 1)
-                        taskYIELD();
+                uint8_t ah_mode = config_get()->audio_haptic;
 
+                for (int slot = 0; slot < 2; slot++) {
                     const uint32_t base = (uint32_t)slot * HALF_ACCUM;
                     const int16_t *slot_pcm =
                         &pcm_block[base * USB_AUDIO_CHANNELS];
 
-                    decimate_haptics(slot_pcm, haptic_slots[slot], HALF_ACCUM);
+                    if (ah_mode == 2) {
+                        audio_to_haptic(slot_pcm, haptic_slots[slot], HALF_ACCUM);
+                    } else if (ah_mode == 1 &&
+                               haptic_channel_silent(slot_pcm, HALF_ACCUM)) {
+                        audio_to_haptic(slot_pcm, haptic_slots[slot], HALF_ACCUM);
+                    } else {
+                        decimate_haptics(slot_pcm, haptic_slots[slot], HALF_ACCUM);
+                    }
 
                     if (speaker_on) {
                         resample_512_480(slot_pcm, spk_resamp);
+                        encode_start_us = bflb_mtimer_get_time_us();
                         encoding_in_progress = true;
-#if LOG_LEVEL >= 3
-                        uint64_t encode_start_us = bflb_mtimer_get_time_us();
-#endif
                         int encoded = opus_encode(encoder, spk_resamp, OPUS_FRAME_SAMPLES,
                                                   opus_slots[slot], OPUS_OUT_SIZE);
                         encoding_in_progress = false;
-#if LOG_LEVEL >= 3
-                        uint32_t encode_elapsed_us = (uint32_t)
-                            (bflb_mtimer_get_time_us() - encode_start_us);
-                        opus_timing_record(&encode_timing, "enc",
-                                           encode_elapsed_us);
-#endif
 
                         if (encoder_reset_pending) {
                             encoder_reset_pending = false;
@@ -477,7 +548,22 @@ void audio_task(void *arg)
                     }
                 }
 
-                send_audio_report();
+                if (send_audio_report() != 0) {
+                    send_fail_streak++;
+                    if (send_fail_streak >= AUDIO_SEND_FAIL_MAX) {
+                        LOG_ERR("[AUDIO] %u consecutive send failures, "
+                                "forcing disconnect\n",
+                                (unsigned)send_fail_streak);
+                        send_fail_streak = 0;
+                        bt_hid_host_disconnect();
+                    } else if (send_fail_streak > 3) {
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                    } else {
+                        vTaskDelay(1);
+                    }
+                } else {
+                    send_fail_streak = 0;
+                }
             }
         }
 
@@ -565,9 +651,6 @@ void audio_mic_task(void *arg)
     static uint8_t  mic_opus_buf[MIC_OPUS_SIZE];
     static int16_t  mic_mono[OPUS_FRAME_SAMPLES];
     static int16_t  mic_stereo[OPUS_FRAME_SAMPLES * 2];
-#if LOG_LEVEL >= 3
-    opus_timing_stats_t decode_timing = {0};
-#endif
 
     for (;;) {
         if (!mic_queue) {
@@ -581,16 +664,8 @@ void audio_mic_task(void *arg)
         if (!decoder || !mic_enabled)
             continue;
 
-#if LOG_LEVEL >= 3
-        uint64_t decode_start_us = bflb_mtimer_get_time_us();
-#endif
         int decoded = opus_decode(decoder, mic_opus_buf, MIC_OPUS_SIZE,
                                   mic_mono, OPUS_FRAME_SAMPLES, 0);
-#if LOG_LEVEL >= 3
-        uint32_t decode_elapsed_us = (uint32_t)
-            (bflb_mtimer_get_time_us() - decode_start_us);
-        opus_timing_record(&decode_timing, "dec", decode_elapsed_us);
-#endif
         if (decoded <= 0) {
             LOG_ERR("[MIC] Opus decode error: %d\n", decoded);
             continue;

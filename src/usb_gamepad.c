@@ -23,9 +23,9 @@
 
 #if defined(BOARD_LCTECH_616)
   #ifdef FORCE_FS_MODE
-    #define FIRMWARE_VERSION "LCT616-DS5 3.17"
+    #define FIRMWARE_VERSION "LCT616-DS5 3.18"
   #else
-    #define FIRMWARE_VERSION "LCT616-DS5 3.17H"
+    #define FIRMWARE_VERSION "LCT616-DS5 3.18H"
   #endif
 #elif defined(BOARD_M0S_DOCK)
 #define FIRMWARE_VERSION "M0S-DS5 3.5"
@@ -43,7 +43,7 @@
 #define USB_HID_CONFIG_SIZE (9 + USB_AUDIO_DESC_SIZE + USB_HID_ONLY_SIZE)
 #define HID_REPORT_DESC_SIZE_DS  329
 #define HID_REPORT_DESC_SIZE_DSE 445
-#define KBD_REPORT_DESC_SIZE 80
+#define KBD_REPORT_DESC_SIZE 138  /* Keyboard + Consumer + Mouse */
 
 static bool current_dse_mode = false;
 
@@ -237,7 +237,7 @@ static const uint8_t hid_report_desc_ds[HID_REPORT_DESC_SIZE_DS] = {
     0xB1, 0x02,
     0x85, 0xFB,       /*   Report ID (251) — button remap table */
     0x09, 0x3C,
-    0x95, 0x3F,
+    0x95, 0x7F,       /*   Report Count (127) — 31 entries * 4 + header */
     0xB1, 0x02,
 
     0xC0,             /* End Collection */
@@ -312,11 +312,11 @@ static const uint8_t hid_report_desc_dse[HID_REPORT_DESC_SIZE_DSE] = {
     0x85, 0xF7, 0x09, 0x38, 0x95, 0x3F, 0xB1, 0x02,
     0x85, 0xF8, 0x09, 0x39, 0x95, 0x3F, 0xB1, 0x02,
     0x85, 0xF9, 0x09, 0x3A, 0x95, 0x3F, 0xB1, 0x02,
-    0x85, 0xFB, 0x09, 0x3C, 0x95, 0x3F, 0xB1, 0x02,  /* button remap table */
+    0x85, 0xFB, 0x09, 0x3C, 0x95, 0x7F, 0xB1, 0x02,  /* button remap table (127B) */
     0xC0,
 };
 
-/* Multi-TLC HID report descriptor: Keyboard (Report ID 1) + Consumer Control (Report ID 2) */
+/* Multi-TLC HID report descriptor: Keyboard (Report ID 1) + Consumer Control (Report ID 2) + Mouse (Report ID 3) */
 static const uint8_t kbd_report_desc[KBD_REPORT_DESC_SIZE] = {
     /* ── Collection 1: Keyboard (Report ID 1, 9 bytes total) ── */
     0x05, 0x01,       /* Usage Page (Generic Desktop) */
@@ -361,6 +361,38 @@ static const uint8_t kbd_report_desc[KBD_REPORT_DESC_SIZE] = {
     0x75, 0x05,       /*   Report Size (5) — padding */
     0x81, 0x01,       /*   Input (Const) */
     0xC0,             /* End Collection */
+
+    /* ── Collection 3: Mouse (Report ID 3, 4 bytes: btns + X + Y + wheel) ── */
+    0x05, 0x01,       /* Usage Page (Generic Desktop) */
+    0x09, 0x02,       /* Usage (Mouse) */
+    0xA1, 0x01,       /* Collection (Application) */
+    0x85, 0x03,       /*   Report ID (3) */
+    0x09, 0x01,       /*   Usage (Pointer) */
+    0xA1, 0x00,       /*   Collection (Physical) */
+    0x05, 0x09,       /*   Usage Page (Button) */
+    0x19, 0x01,       /*   Usage Minimum (1) */
+    0x29, 0x03,       /*   Usage Maximum (3) */
+    0x15, 0x00,       /*   Logical Minimum (0) */
+    0x25, 0x01,       /*   Logical Maximum (1) */
+    0x95, 0x03,       /*   Report Count (3) */
+    0x75, 0x01,       /*   Report Size (1) */
+    0x81, 0x02,       /*   Input (Data,Var,Abs) — 3 buttons */
+    0x95, 0x01,       /*   Report Count (1) */
+    0x75, 0x05,       /*   Report Size (5) */
+    0x81, 0x01,       /*   Input (Const) — padding */
+    0x05, 0x01,       /*   Usage Page (Generic Desktop) */
+    0x09, 0x30,       /*   Usage (X) */
+    0x09, 0x31,       /*   Usage (Y) */
+    0x15, 0x81,       /*   Logical Minimum (-127) */
+    0x25, 0x7F,       /*   Logical Maximum (127) */
+    0x75, 0x08,       /*   Report Size (8) */
+    0x95, 0x02,       /*   Report Count (2) */
+    0x81, 0x06,       /*   Input (Data,Var,Rel) — X, Y */
+    0x09, 0x38,       /*   Usage (Wheel) */
+    0x95, 0x01,       /*   Report Count (1) */
+    0x81, 0x06,       /*   Input (Data,Var,Rel) — Wheel */
+    0xC0,             /*   End Collection (Physical) */
+    0xC0,             /* End Collection (Application) */
 };
 
 static uint8_t device_desc[] = {
@@ -540,6 +572,27 @@ static const char *desc_string_cb(uint8_t speed, uint8_t index)
     default: return NULL;
     }
 }
+
+/* BOS descriptor: declare USB 2.0 Extension with LPM NOT supported.
+ * Prevents Linux from attempting L1 power-state transitions. */
+static const uint8_t bos_desc_raw[] = {
+    /* BOS Header */
+    0x05,                   /* bLength */
+    0x0F,                   /* bDescriptorType: BOS */
+    0x0C, 0x00,             /* wTotalLength: 12 */
+    0x01,                   /* bNumDeviceCaps: 1 */
+
+    /* USB 2.0 Extension Device Capability */
+    0x07,                   /* bLength */
+    0x10,                   /* bDescriptorType: DEVICE_CAPABILITY */
+    0x02,                   /* bDevCapabilityType: USB 2.0 Extension */
+    0x00, 0x00, 0x00, 0x00, /* bmAttributes: bit1=0 → LPM not supported */
+};
+
+static const struct usb_bos_descriptor bos_desc = {
+    .string     = bos_desc_raw,
+    .string_len = sizeof(bos_desc_raw),
+};
 
 static const struct usb_descriptor usb_desc = {
     .device_descriptor_callback          = desc_device_cb,
@@ -753,7 +806,8 @@ int usb_gamepad_init(usb_gamepad_output_cb_t output_cb)
      * no keyboard interface needed. remap KBD type is disabled for now.
      * REMOTE-WAKEUP bit stays in bmAttributes when wake is enabled. */
     const bool need_kbd = remap_has_kbd_targets() ||
-                          config_get()->ps_shortcut_enabled;
+                          config_get()->ps_shortcut_enabled ||
+                          (config_get()->tp_mode == 2 || config_get()->tp_mode == 3);
     const bool need_remote_wake = config_get()->enable_wake || need_kbd;
     if (need_kbd) {
         config_desc[KBD_SUBCLASS_OFF] = 0x00; /* No subclass (multi-TLC, not pure boot) */
@@ -837,6 +891,8 @@ int usb_gamepad_init(usb_gamepad_output_cb_t output_cb)
         volatile uint32_t *dev_ctl = (volatile uint32_t *)(USB_BASE + 0x100);
         uint32_t v = *dev_ctl;
         v |= (1 << 2);  /* USB_GLINT_EN_HOV */
+        v &= ~(1 << 25); /* Clear USB_LPM_EN — refuse L1 power state */
+        v &= ~(1 << 26); /* Clear USB_LPM_ACCEPT — NYET all LPM requests */
         *dev_ctl = v;
     }
 
@@ -945,6 +1001,23 @@ int usb_gamepad_send_consumer_report(uint16_t bits)
     kbd_ep_busy = true;
     kbd_ep_busy_since_us = bflb_mtimer_get_time_us();
     int ret = usbd_ep_start_write(0, USB_KBD_EP_IN, kbd_buf, 2);
+    if (ret < 0)
+        kbd_ep_busy = false;
+    return ret;
+}
+
+int usb_gamepad_send_mouse_report(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
+{
+    if (!usb_configured || !kbd_registered || kbd_ep_busy)
+        return -1;
+    kbd_buf[0] = 0x03; /* Report ID 3 = Mouse */
+    kbd_buf[1] = buttons;
+    kbd_buf[2] = (uint8_t)dx;
+    kbd_buf[3] = (uint8_t)dy;
+    kbd_buf[4] = (uint8_t)wheel;
+    kbd_ep_busy = true;
+    kbd_ep_busy_since_us = bflb_mtimer_get_time_us();
+    int ret = usbd_ep_start_write(0, USB_KBD_EP_IN, kbd_buf, 5);
     if (ret < 0)
         kbd_ep_busy = false;
     return ret;
@@ -1102,10 +1175,22 @@ void usbd_hid_get_report(uint8_t busid, uint8_t intf, uint8_t report_id,
             if (state_mgr_is_spk_active())        aflags |= 0x02;
             if (usb_audio_mic_is_active())         aflags |= 0x01;
             feature_resp_buf[2] = aflags;
-            feature_resp_buf[3] = get_battery_level();
-            feature_resp_buf[4] = get_battery_state();
+            /* Layout kept identical to the private firmware so the companion
+             * web tool can parse RSSI / audio / battery. OTA fields are
+             * reserved and always zero — this build has no OTA. */
+            feature_resp_buf[3]  = 0;   /* OTA status (idle) */
+            feature_resp_buf[4]  = 0;   /* OTA bytes received */
+            feature_resp_buf[5]  = 0;
+            feature_resp_buf[6]  = 0;
+            feature_resp_buf[7]  = 0;
+            feature_resp_buf[8]  = 0;   /* OTA total size */
+            feature_resp_buf[9]  = 0;
+            feature_resp_buf[10] = 0;
+            feature_resp_buf[11] = 0;
+            feature_resp_buf[12] = get_battery_level();
+            feature_resp_buf[13] = get_battery_state();
             *data = feature_resp_buf;
-            *len  = 5;
+            *len  = 14;
         } else if (report_id == 0xFB) {
             feature_resp_buf[0] = 0xFB;
             feature_resp_buf[1] = remap_get_active_profile();
@@ -1194,14 +1279,14 @@ void usbd_hid_set_report(uint8_t busid, uint8_t intf, uint8_t report_id,
         uint8_t cmd = payload[0];
         if (cmd == 0x01) {
             /* 0x01 [profile] [data...] — set remap for profile */
-            if (payload_len >= 2 + REMAP_BTN_COUNT * sizeof(remap_entry_t)) {
+            if (payload_len >= 2 + REMAP_OLD_BTN_COUNT * (int)sizeof(remap_entry_t)) {
                 uint8_t prof = payload[1];
                 if (prof >= REMAP_PROFILE_COUNT) prof = 0;
                 remap_set_profile(prof, payload + 2, (uint8_t)(payload_len - 2));
                 usb_remap_save_profile = prof;
                 usb_remap_save_pending = true;
-                LOG_INF("[USB] CMD 0xFB/0x01: profile %d updated\n", prof);
-            } else if (payload_len >= 1 + REMAP_BTN_COUNT * sizeof(remap_entry_t)) {
+                LOG_INF("[USB] CMD 0xFB/0x01: profile %d updated (%d bytes)\n", prof, payload_len - 2);
+            } else if (payload_len >= 1 + REMAP_OLD_BTN_COUNT * (int)sizeof(remap_entry_t)) {
                 /* backward compat: no profile byte → profile 0 */
                 remap_set_profile(0, payload + 1, (uint8_t)(payload_len - 1));
                 usb_remap_save_profile = 0;

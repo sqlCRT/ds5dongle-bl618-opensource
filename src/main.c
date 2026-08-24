@@ -31,12 +31,11 @@
     (((bytes) + sizeof(StackType_t) - 1) / sizeof(StackType_t))
 
 #define BT_TASK_STACK_SIZE    STACK_WORDS(1024*24)
-#define BT_TASK_PRIORITY      (configMAX_PRIORITIES - 2)
+#define BT_TASK_PRIORITY      (configMAX_PRIORITIES - 3)
 #define USB_TASK_STACK_SIZE   STACK_WORDS(1024*12)
 #define USB_TASK_PRIORITY     (configMAX_PRIORITIES - 1)
-// 设置CONFIG_BT_RX_PRIO=5, 音频任务优先级低于5, 提高回报率
 #define AUDIO_TASK_STACK_SIZE STACK_WORDS(1024*32)
-#define AUDIO_TASK_PRIORITY   (configMAX_PRIORITIES - 3)
+#define AUDIO_TASK_PRIORITY   (configMAX_PRIORITIES - 2)
 #define MIC_TASK_STACK_SIZE   STACK_WORDS(1024*12)
 #define MIC_TASK_PRIORITY     (configMAX_PRIORITIES - 4)
 #define LED_TASK_STACK_SIZE   STACK_WORDS(1024*2)
@@ -56,7 +55,6 @@ static QueueHandle_t output_queue;
 static volatile bool ds5_connected = false;
 static volatile bool ever_connected = false;
 static volatile bool battery_low = false;
-static volatile bool battery_warn = false;
 static volatile bool bt_init_done = false;
 
 static volatile uint8_t cached_battery_level = 0xFF;
@@ -368,7 +366,7 @@ static void on_hid_state(enum bt_hid_host_state state)
         first_input_logged = false;
         usb_wake_on_bt_disconnect();
         if (was_connected && !bt_hid_host_is_switching() &&
-            !config_wake_enabled() && !usb_wake_host_suspended()) {
+            !usb_wake_host_suspended()) {
             usb_deferred_disc_us = bflb_mtimer_get_time_us();
             LOG_INF("[MAIN] USB disconnect deferred (10s timer started)\n");
         }
@@ -443,11 +441,12 @@ static void on_hid_state(enum bt_hid_host_state state)
             if (usb_deferred_disc_us) {
                 usb_deferred_disc_us = 0;
                 LOG_INF("[MAIN] Deferred disconnect cancelled — USB stayed connected\n");
+                send_led_primer();
             } else {
                 usb_soft_connect();
                 LOG_INF("[MAIN] USB replug (was disconnected)\n");
+                stealth_primer_countdown = 5;
             }
-            stealth_primer_countdown = 5;
         } else if (config_usb_stealth()) {
             /* First connection, stealth: USB was disconnected at boot.
              * Let Windows send blue init, then override with our primer. */
@@ -463,7 +462,6 @@ static void on_hid_state(enum bt_hid_host_state state)
         ds5_connected = true;
         ever_connected = true;
         battery_low = false;
-        battery_warn = false;
         primer_resend_us = bflb_mtimer_get_time_us();
         usb_wake_on_bt_connect();
         conn_led_start_us = bflb_mtimer_get_time_us();
@@ -611,6 +609,8 @@ static void bt_task(void *arg)
     conn_led_start_us = bflb_mtimer_get_time_us();
 
     for (;;) {
+        audio_check_respawn();
+
         loop_count++;
         if ((loop_count % 50) == 1) {
             LOG_DBG("[BT_TASK] loop #%u state=%d conn=%d\n",
@@ -810,8 +810,6 @@ static void bt_task(void *arg)
                 if (ds5_connected) {
                     if (battery_low)
                         led_status_set(LED_BLINK_BATTERY);
-                    else if (battery_warn)
-                        led_status_set(LED_BLINK_BATTERY_WARN);
                     else
                         led_status_set(LED_GREEN_SOLID);
                     LOG_DBG("[LED-DBG] toggle OFF: restored green, conn=1\n");
@@ -874,8 +872,8 @@ static void bt_task(void *arg)
                     bt_hid_host_send_output(bt_out, DS5_BT_OUTPUT_REPORT_SIZE);
                     batch++;
                 }
-                vTaskDelay(pdMS_TO_TICKS(16));
-            } else if (xQueueReceive(output_queue, usb_out, pdMS_TO_TICKS(16)) == pdTRUE) {
+                vTaskDelay(pdMS_TO_TICKS(24));
+            } else if (xQueueReceive(output_queue, usb_out, pdMS_TO_TICKS(24)) == pdTRUE) {
                 uint8_t *payload = usb_out + 1;
 
                 /* Stealth mode: drain Windows' blue init frames without forwarding
@@ -1066,6 +1064,9 @@ static void usb_task(void *arg)
     /* Remap profile switch: Create + D-pad Left/Right */
     bool     remap_combo_fired = false;
 
+    /* Touchpad mode cycle: Create + Touchpad Press */
+    bool     tp_mode_combo_fired = false;
+
     /* Volume combo: Options + D-pad Up/Down → Consumer Control Volume */
     bool     vol_key_active = false;
     uint64_t vol_repeat_us  = 0;
@@ -1152,8 +1153,66 @@ static void usb_task(void *arg)
                 }
             }
 
+            /* Remap profile switch: Create + D-pad Left → profile 0, Right → profile 1 */
+            {
+                bool create_held = (raw_report[2 + DS5_BTN_BYTE] & DS5_BTN_CREATE_BIT) != 0;
+                uint8_t dpad = raw_report[2 + DS5_DPAD_BYTE] & DS5_DPAD_MASK;
+
+                if (create_held && !remap_combo_fired) {
+                    int target = -1;
+                    if (dpad == DS5_DPAD_W)
+                        target = 0;
+                    else if (dpad == DS5_DPAD_E)
+                        target = 1;
+
+                    if (target >= 0 && target != remap_get_active_profile()) {
+                        remap_switch_profile((uint8_t)target);
+                        led_status_set(target == 0 ? LED_BLINK_ONCE : LED_BLINK_DOUBLE);
+                        LOG_INF("[REMAP] Combo → profile %d\n", target);
+                        remap_combo_fired = true;
+                    }
+                }
+                if (!create_held)
+                    remap_combo_fired = false;
+            }
+
+            /* Touchpad mode cycle: Create + Touchpad Press */
+            {
+                bool create_held = (raw_report[2 + DS5_BTN_BYTE] & DS5_BTN_CREATE_BIT) != 0;
+                bool tp_pressed  = (raw_report[2 + 9] & 0x02) != 0;
+
+                static uint8_t tp_dbg_cnt = 0;
+                if (create_held && tp_pressed && tp_dbg_cnt < 5) {
+                    LOG_INF("[TP-DBG] Create+TP detected, fired=%d mode=%u mask=0x%02x\n",
+                            tp_mode_combo_fired, config_get()->tp_mode,
+                            config_get()->tp_mode_enabled_mask);
+                    tp_dbg_cnt++;
+                }
+
+                if (create_held && tp_pressed && !tp_mode_combo_fired) {
+                    remap_tp_cycle_mode();
+                    uint8_t new_mode = config_get()->tp_mode;
+                    static const uint8_t mode_blinks[] = {
+                        LED_BLINK_ONCE, LED_BLINK_DOUBLE, LED_BLINK_TRIPLE,
+                        LED_BLINK_TRIPLE, LED_BLINK_TRIPLE
+                    };
+                    led_status_set(mode_blinks[new_mode]);
+                    LOG_INF("[TP] Combo → mode %u\n", new_mode);
+                    tp_mode_combo_fired = true;
+                }
+                if (!create_held || !tp_pressed)
+                    tp_mode_combo_fired = false;
+
+                /* Suppress Create+TP from reaching game */
+                if (create_held && tp_pressed) {
+                    raw_report[2 + DS5_BTN_BYTE] &= ~DS5_BTN_CREATE_BIT;
+                    raw_report[2 + 9] &= ~0x02;
+                }
+            }
+
             if (!vol_key_active)
                 remap_kbd_tick(raw_report + 2);
+            remap_mouse_tick(raw_report + 2);
             remap_apply(raw_report + 2);
             usb_gamepad_send_raw_input(raw_report + 2);
             usb_wake_on_bt_input(raw_report + 2, DS5_USB_INPUT_PAYLOAD_LEN);
@@ -1185,7 +1244,7 @@ static void usb_task(void *arg)
                     inactive_disconnected = false;
                 }
 
-                /* Battery monitoring: <=10% red blink, <=20% yellow blink */
+                /* Battery monitoring: <=10% red blink */
                 uint8_t batt = raw_report[2 + DS5_BATT_BYTE_OFFSET];
                 uint8_t pct  = batt & DS5_BATT_LEVEL_MASK;
                 uint8_t st   = (batt >> DS5_BATT_STATE_SHIFT) & 0x0F;
@@ -1193,21 +1252,13 @@ static void usb_task(void *arg)
                 cached_battery_state = st;
                 bool discharging = (st == DS5_BATT_STATE_DISCHARGE);
                 bool is_low  = discharging && (pct <= DS5_BATT_LOW_THRESHOLD);
-                bool is_warn = discharging && !is_low &&
-                               (pct <= DS5_BATT_WARN_THRESHOLD);
 
                 if (is_low && !battery_low) {
                     battery_low = true;
-                    battery_warn = false;
                     led_status_set(LED_BLINK_BATTERY);
                     LOG_WRN("[MAIN] Battery critical (%d%%)\n", pct * 10);
-                } else if (is_warn && !battery_warn && !battery_low) {
-                    battery_warn = true;
-                    led_status_set(LED_BLINK_BATTERY_WARN);
-                    LOG_WRN("[MAIN] Battery warning (%d%%)\n", pct * 10);
-                } else if (!is_low && !is_warn && (battery_low || battery_warn)) {
+                } else if (!is_low && battery_low) {
                     battery_low = false;
-                    battery_warn = false;
                     if (config_led_disabled() && conn_led_off)
                         led_status_set(LED_OFF);
                     else
@@ -1224,29 +1275,6 @@ static void usb_task(void *arg)
                         bt_hid_host_disconnect();
                         inactive_disconnected = true;
                     }
-                }
-
-                /* Remap profile switch: Create + D-pad Left → profile 0, Right → profile 1 */
-                {
-                    bool create_held = (raw_report[2 + DS5_BTN_BYTE] & DS5_BTN_CREATE_BIT) != 0;
-                    uint8_t dpad = raw_report[2 + DS5_DPAD_BYTE] & DS5_DPAD_MASK;
-
-                    if (create_held && !remap_combo_fired) {
-                        int target = -1;
-                        if (dpad == DS5_DPAD_W)
-                            target = 0;
-                        else if (dpad == DS5_DPAD_E)
-                            target = 1;
-
-                        if (target >= 0 && target != remap_get_active_profile()) {
-                            remap_switch_profile((uint8_t)target);
-                            led_status_set(target == 0 ? LED_BLINK_ONCE : LED_BLINK_DOUBLE);
-                            LOG_INF("[REMAP] Combo → profile %d\n", target);
-                            remap_combo_fired = true;
-                        }
-                    }
-                    if (!create_held)
-                        remap_combo_fired = false;
                 }
 
                 /* PS key scheduled send + release (runs unconditionally) */
@@ -1413,7 +1441,7 @@ int main(void)
                 NULL, USB_TASK_PRIORITY, NULL);
     if (audio_ok) {
         xTaskCreate(audio_task, "audio", AUDIO_TASK_STACK_SIZE,
-                    NULL, AUDIO_TASK_PRIORITY, NULL);
+                    NULL, AUDIO_TASK_PRIORITY, NULL);  /* handle stored in audio_task() */
         xTaskCreate(audio_mic_task, "mic", MIC_TASK_STACK_SIZE,
                     NULL, MIC_TASK_PRIORITY, NULL);
     }

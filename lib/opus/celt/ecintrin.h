@@ -48,9 +48,7 @@
 /*Count leading zeros.
   This macro should only be used for implementing ec_ilog(), if it is defined.
   All other code should use EC_ILOG() instead.*/
-#if defined(E907_OPUS_DSP)
-/* E907 has a native count-leading-zero instruction. Without this override,
-   GCC lowers __builtin_clz() to the out-of-line libgcc __clzsi2 helper. */
+#if defined(E907_OPUS_DSP) && !defined(E907_DISABLE_FF1)
 static __inline__ unsigned int opus_e907_clz(unsigned int value)
 {
   unsigned int result;

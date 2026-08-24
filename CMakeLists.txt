@@ -58,10 +58,7 @@ set(OPUS_INCLUDE_DIRS
 target_include_directories(libopuscodec PRIVATE ${OPUS_INCLUDE_DIRS})
 target_include_directories(app PRIVATE ${OPUS_INCLUDE_DIRS})
 
-# Keep every Opus instruction in SRAM/TCM. Opus is compiled without LTO so the
-# linker can reliably select libopuscodec.a members instead of anonymous LTO
-# partitions. The board's original linker template remains the source of truth;
-# only the archive selector below is injected into its tcm_text output section.
+# Place all Opus code+rodata into SRAM/TCM via linker script injection
 get_property(OPUS_BASE_LINKER_SCRIPT GLOBAL PROPERTY LINKER_SCRIPT_IN)
 if(NOT EXISTS "${OPUS_BASE_LINKER_SCRIPT}")
     message(FATAL_ERROR "Cannot locate the board linker template: ${OPUS_BASE_LINKER_SCRIPT}")
